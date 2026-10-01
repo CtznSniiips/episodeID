@@ -1,9 +1,6 @@
 # EpisodeID
 
-Works out which episode each video file **really** contains by reading its
-dialogue, then renames (and if needed splits) files to TVDB numbering so they
-line up with Sonarr. It generalises the Gumball matcher to any series and runs
-as a Docker container with a web UI.
+Works out which episode each video file **really** contains by reading its dialogue, then renames (and if needed splits) files to TVDB numbering so they line up with Sonarr. Works with any series and runs as a Docker container with a web UI.
 
 ## How it works
 
@@ -11,33 +8,17 @@ as a Docker container with a web UI.
 2. **References** are what each episode is supposed to say, fetched once and cached:
    - files you upload yourself (*Episodes & references* tab), highest priority
    - a Fandom wiki transcript page, if you set one for the series (no quota cost)
-   - OpenSubtitles, looked up by the episode's IMDb ID from TVDB. If only the
-     series ID is available it searches by season/episode and checks the title,
-     then falls back to searching by title, so differing numbering schemes don't
-     silently give you the wrong reference.
-3. **Your files' dialogue** comes from a sidecar `.srt/.ass/.vtt`, else an embedded
-   text subtitle track, else **Whisper** (faster-whisper; also covers image-based PGS/VobSub subs).
-   Results are cached, and survive renames.
-4. **Matching**: the dialogue is cut into 90 s windows (every 45 s), each scored
-   against every reference with TF-IDF cosine similarity. A Viterbi pass picks one
-   episode per window with a switching penalty, giving clean segments, so two-episode
-   files and swapped halves are detected. Each segment is re-scored as a whole for its
-   confidence.
-5. **AI fallback (optional)**: any OpenAI-compatible endpoint (Ollama `/v1`, OpenAI,
-   LM Studio, vLLM, OpenRouter…). Only consulted for files the matcher couldn't
-   settle, choosing among ≤12 unclaimed candidates using TVDB summaries. Its picks are
-   marked **AI** and are never ticked for apply automatically.
-6. **Plan → Apply → Undo**: the plan is shown as a table you can tick, untick and
-   correct (*Set episode…*). Apply requires typing `APPLY`.
+   - OpenSubtitles, looked up by the episode's IMDb ID from TVDB. If only the series ID is available it searches by season/episode and checks the title, then falls back to searching by title, so differing numbering schemes don't silently give you the wrong reference.
+3. **Your files' dialogue** comes from a sidecar `.srt/.ass/.vtt`, else an embedded text subtitle track, else **Whisper** (faster-whisper; also covers image-based PGS/VobSub subs). Results are cached, and survive renames.
+4. **Matching**: the dialogue is cut into 90 s windows (every 45 s), each scored against every reference with TF-IDF cosine similarity. A Viterbi pass picks one episode per window with a switching penalty, giving clean segments, so two-episode files and swapped halves are detected. Each segment is re-scored as a whole for its confidence.
+5. **AI fallback (optional)**: any OpenAI-compatible endpoint (Ollama `/v1`, OpenAI, LM Studio, vLLM, OpenRouter…). Only consulted for files the matcher couldn't settle, choosing among ≤12 unclaimed candidates using TVDB summaries. Its picks are marked **AI** and are never ticked for apply automatically.
+6. **Plan → Apply → Undo**: the plan is shown as a table you can tick, untick and correct (*Set episode…*). Apply requires typing `APPLY`.
 
 ### Safety
-- Nothing is deleted. Displaced files go to `<series>/_episodeid_backup/`:
-  `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`,
-  `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.
+- Nothing is deleted. Displaced files go to `<series>/_episodeid_backup/`: `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.
 - Every disk operation is logged as it happens, so even an interrupted apply can be undone.
 - Renames go through temporary names in two passes, so swaps and rotations are safe.
-- Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap
-  between episodes.
+- Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap between episodes.
 - Undo works newest-first and restores every move; split pieces are parked in `undone/`.
 - All paths are confined to the mounted media folder.
 
@@ -57,14 +38,11 @@ Volumes:
 
 `PUID`/`PGID` default to Unraid's `99:100`. An Unraid template is in `unraid/episodeid.xml`.
 
-**GPU Whisper**: build `Dockerfile.cuda` (image tag `-cuda` from CI), run with
-`--runtime=nvidia` / `--gpus all`. It defaults to `large-v3` on CUDA. On CPU, `small`
-is a good balance; expect a few minutes per 22-minute episode.
+**GPU Whisper**: build `Dockerfile.cuda` (image tag `-cuda` from CI), run with `--runtime=nvidia` / `--gpus all`. It defaults to `large-v3` on CUDA. On CPU, `small` is a good balance; expect a few minutes per 22-minute episode.
 
 ## Settings
 
-Everything is editable in the web UI; any environment variable overrides the UI value
-(shown as *locked*). Secrets are never sent back to the browser.
+Everything is editable in the web UI; any environment variable overrides the UI value (shown as *locked*). Secrets are never sent back to the browser.
 
 | Env var | Default | |
 |---|---|---|
@@ -83,29 +61,7 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 ## Workflow
 
 1. **Settings** → add the TVDB key (and OpenSubtitles / Sonarr / AI if wanted) and press *Test*.
-2. **Add series** → pick the show folder → pick the TVDB match. Folders named the Sonarr
-   way (`Show (2011) {tvdb-248482}`) are recognised.
-3. **Fetch references**. Re-run it after the OpenSubtitles quota resets until coverage is
-   complete; upload anything that can't be found.
+2. **Add series** → pick the show folder → pick the TVDB match. Folders named the Sonarr way (`Show (2011) {tvdb-248482}`) are recognised.
+3. **Fetch references**. Re-run it after the OpenSubtitles quota resets until coverage is complete; upload anything that can't be found.
 4. **Scan files**, review the plan, fix anything in *Needs review*, **Apply**.
 5. If something looks wrong: **History → Undo**.
-
-## Development
-
-```bash
-pip install -r requirements.txt
-MEDIA_ROOT=/path/to/tv CONFIG_DIR=./config CACHE_DIR=./cache uvicorn app.main:app --reload --port 8686
-EPID_TEST_DIR=/tmp/epid python tests/synthetic_test.py   # end-to-end test on a generated library
-```
-
-| Module | |
-|---|---|
-| `app/tvdb.py` | TVDB v4 client |
-| `app/references.py` | OpenSubtitles / Fandom / manual references + cache |
-| `app/media_text.py`, `app/transcribe.py` | subtitle extraction, Whisper |
-| `app/matcher.py` | windowed TF-IDF + Viterbi segmentation |
-| `app/llm.py` | OpenAI-compatible fallback |
-| `app/planner.py` | scan results → plan (claims, duplicates, naming) |
-| `app/executor.py` | apply / undo / ffmpeg splitting / Sonarr |
-| `app/pipeline.py`, `app/jobs.py` | background jobs |
-| `app/main.py`, `app/static/` | API and web UI |
