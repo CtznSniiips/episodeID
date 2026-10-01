@@ -1,0 +1,36 @@
+services:
+  episodeid:
+    image: ghcr.io/ctznsniiips/episodeid:latest
+    build: .
+    container_name: episodeid
+    ports:
+      - "8686:8686"
+    environment:
+      - PUID=99
+      - PGID=100
+      - TZ=America/New_York
+      # Secrets can live here instead of the web UI (env always wins):
+      # - TVDB_API_KEY=
+      # - OPENSUBTITLES_API_KEY=
+      # - OPENSUBTITLES_USERNAME=
+      # - OPENSUBTITLES_PASSWORD=
+      # - SONARR_URL=http://sonarr:8989
+      # - SONARR_API_KEY=
+      # - LLM_ENABLED=true
+      # - LLM_BASE_URL=http://ollama:11434/v1
+      # - LLM_MODEL=qwen3:8b
+    volumes:
+      - ./config:/config
+      - ./cache:/cache
+      # Mount your TV library at the SAME path Sonarr sees is easiest to reason about,
+      # but any path works. It must be read-write.
+      - /mnt/user/tv:/media/tv
+    restart: unless-stopped
+    # GPU Whisper: build Dockerfile.cuda and uncomment
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

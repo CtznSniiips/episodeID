@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>EpisodeID</Name>
+  <Repository>ghcr.io/ctznsniiips/episodeid:latest</Repository>
+  <Registry>https://github.com/CtznSniiips/EpisodeID/pkgs/container/episodeid</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CtznSniiips/EpisodeID/issues</Support>
+  <Project>https://github.com/CtznSniiips/EpisodeID</Project>
+  <Overview>Identifies which episode each video file really contains by matching its dialogue (subtitles, or a Whisper transcript) against reference subtitles, then renames/splits files to TVDB numbering so they line up with Sonarr. Every change can be undone; nothing is deleted.</Overview>
+  <Category>MediaApp:Video Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8686]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/CtznSniiips/EpisodeID/main/app/static/icon.svg</Icon>
+  <ExtraParams/>
+  <Config Name="WebUI Port" Target="8686" Default="8686" Mode="tcp" Description="Web interface" Type="Port" Display="always" Required="true" Mask="false">8686</Config>
+  <Config Name="TV library" Target="/media/tv" Default="/mnt/user/tv" Mode="rw" Description="Your TV folder (read-write)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/tv</Config>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/episodeid/config" Mode="rw" Description="Settings, database, manual references" Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/episodeid/config</Config>
+  <Config Name="Cache" Target="/cache" Default="/mnt/user/appdata/episodeid/cache" Mode="rw" Description="Downloaded references, transcripts, Whisper models" Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/episodeid/cache</Config>
+  <Config Name="TVDB API key" Target="TVDB_API_KEY" Default="" Mode="" Description="Optional here; can be set in the web UI instead." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="OpenSubtitles API key" Target="OPENSUBTITLES_API_KEY" Default="" Mode="" Description="Optional here; can be set in the web UI." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Whisper model" Target="WHISPER_MODEL" Default="small" Mode="" Description="tiny / base / small / medium / large-v3" Type="Variable" Display="advanced" Required="false" Mask="false">small</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="UMASK" Target="UMASK" Default="002" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="false">002</Config>
+</Container>
