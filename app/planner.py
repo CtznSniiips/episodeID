@@ -332,7 +332,9 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
             continue
         involved = set(it.get("codes") or []) | set(it.get("expected") or [])
         shaky = sorted(c for c in involved if (meta.get(c) or {}).get("low_trust"))
-        if shaky and not any(sg.get("override") for sg in it.get("segments") or []):
+        segs = it.get("segments") or []
+        by_title = bool(segs) and all("title" in (sg.get("evidence") or "") for sg in segs)
+        if shaky and not by_title and not any(sg.get("override") for sg in segs):
             details = ", ".join(
                 f"{c} (OpenSubtitles has it as {meta[c].get('os_number')} "
                 f"'{meta[c].get('os_title')}')" for c in shaky)

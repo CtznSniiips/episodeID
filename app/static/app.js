@@ -75,7 +75,7 @@ async function refreshChips() {
     const s = await api("/api/status");
     const chip = (on, label) => `<span class="chip ${on ? "on" : ""}">${on ? "●" : "○"} ${label}</span>`;
     $("#chips").innerHTML = chip(s.tvdb, "TVDB") + chip(s.opensubtitles, "OpenSubtitles") +
-      chip(s.whisper, "Whisper") + chip(s.llm, "AI") + chip(s.sonarr, "Sonarr") +
+      chip(s.whisper, "Whisper") + chip(s.titlecards, "Title cards") + chip(s.llm, "AI") + chip(s.sonarr, "Sonarr") +
       `<span class="chip">v${esc(s.version)}</span>`;
     return s;
   } catch { return {}; }
@@ -318,10 +318,16 @@ function segHtml(sg, eps) {
     h += ` <span class="small">${esc(e.title)}</span>` + (e.ref ?
       ` <span class="small ${shaky ? "" : "muted"}" style="${shaky ? "color:var(--warn)" : ""}" title="${esc(e.ref_note || "")}">· ref: ${esc(e.ref.split(":")[0])}${shaky ? " ⚠" : ""}</span>` : "");
   }
-  if (sg.confidence !== "high" && sg.why)
+  if (sg.why && (sg.confidence !== "high" || sg.evidence === "title+filename"))
     h += `<div class="small" style="color:var(--warn)">${esc(sg.why)}</div>`;
   else if (sg.confidence !== "high" && sg.alternatives && sg.alternatives.length)
     h += ` <span class="muted small">(or ${sg.alternatives.slice(0, 2).map((a) => esc(a.code)).join(", ")})</span>`;
+  if (sg.title_card) {
+    const tc = sg.title_card, conflict = sg.confidence === "conflict";
+    h += `<div class="small"><span class="badge ${conflict ? "b-warn" : "b-ok"}" title="OCR score ${tc.score}">title card</span>
+      <span class="muted">“${esc(tc.text)}” at ${fmtTime(tc.time)} → ${esc(tc.code)}${
+      sg.dialogue_code && !conflict ? ` (dialogue said ${esc(sg.dialogue_code)})` : ""}</span></div>`;
+  }
   if (sg.llm) h += `<div class="small"><span class="badge b-ai">AI → ${esc(sg.llm.code)} ${Math.round(sg.llm.confidence * 100)}%</span>
     <span class="muted">${esc(sg.llm.reason)}</span></div>`;
   return h + `</span>`;
@@ -532,6 +538,15 @@ async function tabOptions() {
     ${field("imdb_id", "IMDb ID", s.imdb_id || "", "From TVDB. Used to look up subtitles on OpenSubtitles (e.g. tt1942683).")}
     <div class="field"><label>Include specials (season 0)</label><input type="checkbox" name="include_specials" ${o.include_specials ? "checked" : ""}></div>
     </fieldset>
+    <fieldset><legend>Title cards</legend>
+    <div class="field"><label>Read on-screen titles</label>
+      <select name="title_cards">${[["auto", "Auto — test a few files first"], ["on", "On"], ["off", "Off"]].map(([v, t]) =>
+        `<option value="${v}" ${(o.title_cards || "auto") === v ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <div class="hint">${tcStatus(o)}</div></div>
+    <div class="field"><label>Check</label>
+      <select name="title_cards_scope">${[["unconfirmed", "Only files the dialogue match didn't confirm"], ["all", "Every file (slower)"]].map(([v, t]) =>
+        `<option value="${v}" ${(o.title_cards_scope || "unconfirmed") === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+    </fieldset>
     <fieldset><legend>Fandom wiki transcripts (optional)</legend>
     ${field("fandom_wiki", "Wiki", o.fandom_wiki || "", "Subdomain or host, e.g. theamazingworldofgumball — checked before OpenSubtitles and costs no download quota.")}
     ${field("fandom_page_pattern", "Transcript page", o.fandom_page_pattern || "{title}/Transcript", "Use {title}, {season}, {episode}.")}
@@ -551,7 +566,8 @@ async function tabOptions() {
       state.series = await api(`/api/series/${s.id}/options`, { method: "PATCH", body: {
         name_in_files: f.name_in_files.value.trim(), imdb_id: f.imdb_id.value.trim(),
         include_specials: f.include_specials.checked, fandom_wiki: f.fandom_wiki.value.trim(),
-        fandom_page_pattern: f.fandom_page_pattern.value.trim(), fandom_title_overrides: ov } });
+        fandom_page_pattern: f.fandom_page_pattern.value.trim(), fandom_title_overrides: ov,
+        title_cards: f.title_cards.value, title_cards_scope: f.title_cards_scope.value } });
       toast("Saved");
     } catch (err) { fail(err); }
   };
@@ -560,6 +576,13 @@ async function tabOptions() {
     await api(`/api/series/${s.id}`, { method: "DELETE" });
     location.hash = "#/";
   };
+}
+
+function tcStatus(o) {
+  const st = o.title_cards_status;
+  if (!st || st.has_cards === undefined) return "Not tested yet — the next scan checks a few files.";
+  if (!st.has_cards) return `Not found on ${st.hits}/${st.probed} test files, so not used. Choose On to force it.`;
+  return `Found on ${st.hits}/${st.probed} test files` + (st.window ? `, usually ${fmtTime(st.window[0])}–${fmtTime(st.window[1])} into an episode.` : ".");
 }
 
 function field(name, label, value, hint = "", type = "text", locked = false) {
@@ -603,6 +626,15 @@ async function renderSettings() {
     ${sel("whisper_compute_type", "Compute type", [["default", "default (int8 on CPU, float16 on GPU)"], ["int8", "int8"], ["int8_float16", "int8_float16"], ["float16", "float16"], ["float32", "float32"]])}
     ${f("whisper_language", "Spoken language", "e.g. en. Leave blank to auto-detect.")}
     ${test("whisper")}</fieldset>
+  <fieldset><legend>Title cards</legend>
+    <p class="muted small" style="margin-top:0">Reads the episode title shown on screen (OCR) as evidence independent of
+      subtitles and references. Each series tests a few files first and only uses it if the show has title cards.</p>
+    ${cb("titlecard_enabled", "Enabled")}
+    ${f("titlecard_scan_seconds", "Search the first (s)", "How far into each episode to look for the card when its usual position isn't known yet.", "number")}
+    ${f("titlecard_fps", "Frames per second", "1 is enough for cards shown for 2+ seconds.")}
+    ${cb("titlecard_vision", "Use a vision model when OCR can't read a card", "Sends a few frames to the AI endpoint below. Needs a vision-capable model (e.g. qwen2.5vl in Ollama).")}
+    ${f("llm_vision_model", "Vision model", "Leave blank to use the AI model below.")}
+  </fieldset>
   <fieldset><legend>AI fallback (optional, OpenAI-compatible)</legend>
     <p class="muted small" style="margin-top:0">Only used for files the dialogue match can't settle, choosing among a short list of
       candidates. Its picks are marked <span class="badge b-ai">AI</span> and are never ticked for apply automatically.</p>

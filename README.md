@@ -14,6 +14,26 @@ Works out which episode each video file **really** contains by reading its dialo
 5. **AI fallback (optional)**: any OpenAI-compatible endpoint (Ollama `/v1`, OpenAI, LM Studio, vLLM, OpenRouter…). Only consulted for files the matcher couldn't settle, choosing among ≤12 unclaimed candidates using TVDB summaries. Its picks are marked **AI** and are never ticked for apply automatically.
 6. **Plan → Apply → Undo**: the plan is shown as a table you can tick, untick and correct (*Set episode…*). Apply requires typing `APPLY`.
 
+### Title cards
+
+For shows that put the episode title on screen, EpisodeID can read it with OCR
+(RapidOCR, bundled models, CPU) and use it as evidence that doesn't depend on
+subtitles, references or anyone's episode numbering:
+
+- **Auto** (default per series): the first scan tests up to 6 files. Title cards are
+  used only if they're found on most of them, and their usual position is learned so
+  later files are checked quickly. Change it under *Series options*: Auto / On / Off,
+  and whether to check every file or only those the dialogue match didn't confirm.
+- Title card agrees with the dialogue → confirmed. Title card **and** filename agree but
+  the dialogue doesn't → the file is left alone and the log names the reference to check.
+  Weak dialogue → the title card decides. Strong dialogue disagreeing with both → review.
+- Files with no subtitles and no transcript can be identified from their cards alone,
+  including two-episode files with two cards.
+- Optional: send hard-to-read cards to a vision-capable model on the AI endpoint
+  (*Settings → Title cards*).
+- Only large on-screen text counts, and it must match one title clearly better than any
+  other, so signs and credits in the background are ignored. OCR results are cached.
+
 ### Safety
 - Nothing is deleted. Displaced files go to `<series>/_episodeid_backup/`: `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.
 - Every disk operation is logged as it happens, so even an interrupted apply can be undone.

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import db, llm, tvdb
+from . import db, llm, titlecard, tvdb
 from .config import get_settings
 from .executor import apply_plan, sonarr_rescan, undo_apply
 from .jobs import handler
@@ -117,6 +117,8 @@ def job_scan(ctx, params):
             if sg.get("why"):
                 ctx.log(f"{'':<16}   {sg['code']}? {sg['why']}")
 
+    _titlecard_pass(series, files, eps, ctx)
+
     if llm.available():
         _llm_pass(series, files, eps, refs, ctx)
 
@@ -129,6 +131,191 @@ def job_scan(ctx, params):
     plan_id = db.add_plan(series["id"], scan_id, items)
     ctx.log("Summary: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     return {"scan_id": scan_id, "plan_id": plan_id, "counts": counts}
+
+
+# ------------------------------------------------------------- title cards
+
+def _fmt_t(t: float) -> str:
+    return f"{int(t // 60)}:{int(t % 60):02d}"
+
+
+def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
+    """Merge title-card evidence into a scanned file's segments. Returns log notes."""
+    f["title_cards"] = [{k: c[k] for k in ("code", "title", "text", "score", "time")}
+                        for c in cards]
+    if not cards:
+        return []
+    notes = []
+    segs = f["segments"]
+    dur = float(f.get("duration") or 0)
+    if not segs:
+        # No usable dialogue: the title cards alone identify the episode(s).
+        for i, c in enumerate(cards):
+            start = 0.0 if i == 0 else max(segs[-1]["start"] + 60, c["time"] - 5)
+            if segs:
+                segs[-1]["end"] = max(segs[-1]["start"] + 30, c["time"] - 90)
+            segs.append({"start": round(start, 1), "end": round(dur, 1), "code": c["code"],
+                         "score": c["score"], "margin": 0, "confidence": "high",
+                         "alternatives": [], "evidence": "title", "why": "",
+                         "title_card": f["title_cards"][i]})
+        notes.append("identified from title card" + ("s" if len(cards) > 1 else ""))
+    else:
+        for i, c in enumerate(f["title_cards"]):
+            # the segment this card belongs to: the last one starting before (card time + 60 s)
+            idx = max([j for j, sg in enumerate(segs) if sg["start"] <= c["time"] + 60] or [0])
+            sg = segs[idx]
+            if sg.get("title_card"):
+                continue
+            sg["title_card"] = c
+            old = sg["code"]
+            if c["code"] == old:
+                sg.update(confidence="high", evidence="dialogue+title", why="")
+            elif c["code"] in (f.get("expected") or []):
+                sg.update(dialogue_code=old, code=c["code"], confidence="high",
+                          evidence="title+filename",
+                          why=f"dialogue matched {old}; title card and filename both say "
+                              f"{c['code']} — the reference for {old} may be wrong")
+                notes.append(f"title card '{c['text']}' confirms the filename; dialogue said {old} "
+                             f"(check the reference for {old})")
+            elif sg.get("confidence") != "high":
+                sg.update(dialogue_code=old, code=c["code"], confidence="high",
+                          evidence="title", why="")
+                notes.append(f"weak dialogue match{' ' + old if old else ''} settled by title card")
+            else:
+                sg.update(confidence="conflict", title_conflict=c["code"],
+                          why=f"title card reads '{c['text']}' ({c['code']}) but dialogue "
+                              f"matches {old}")
+                notes.append(f"CONFLICT: title card says {c['code']}, dialogue says {old}")
+        merged: list[dict] = []
+        for sg in segs:
+            if merged and merged[-1]["code"] == sg["code"] and \
+                    merged[-1].get("confidence") == sg.get("confidence"):
+                merged[-1]["end"] = sg["end"]
+            else:
+                merged.append(sg)
+        segs = merged
+    f["segments"] = segs
+    f["status"], note = classify(f.get("expected") or [], segs, f.get("text_source") or "none")
+    if notes and f["status"] != "LOW_CONFIDENCE":
+        note = "; ".join(notes)
+    f["note"] = note
+    return notes
+
+
+def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx) -> None:
+    s = get_settings()
+    opts = dict(series.get("options") or {})
+    mode = opts.get("title_cards", "auto")
+    if not s["titlecard_enabled"] or mode == "off" or not files:
+        return
+    if not titlecard.available():
+        ctx.log("Title cards: OCR engine not installed in this image — skipped.")
+        return
+    root = Path(series["path"])
+    index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")))
+    runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
+    runtime = runtimes[len(runtimes) // 2] if runtimes else None
+    status = dict(opts.get("title_cards_status") or {})
+    scope_all = opts.get("title_cards_scope") == "all"
+    done: set[str] = set()
+    hit_times: list[float] = []
+
+    def run(f: dict, learned) -> list[dict]:
+        cards = titlecard.detect(root / f["rel"], float(f.get("duration") or 0), f["segments"],
+                                 index, learned, runtime, ctx)
+        for c in cards:
+            starts = titlecard.episode_starts(float(f.get("duration") or 0), f["segments"], runtime)
+            base = max([x for x in starts if x <= c["time"]] or [0.0])
+            hit_times.append(c["time"] - base)
+        return cards
+
+    def learn() -> list | None:
+        if len(hit_times) < 2:
+            return status.get("window")
+        ts = sorted(hit_times)
+        med = ts[len(ts) // 2]
+        return [max(0.0, round(med - 40)), round(med + 60)]
+
+    def report(f, cards, notes):
+        if cards:
+            desc = ", ".join(f"'{c['text']}' @{_fmt_t(c['time'])} → {c['code']}" for c in cards)
+            ctx.log(f"  title card {f['rel']}: {desc}" + (f" — {'; '.join(notes)}" if notes else ""))
+
+    if mode == "auto" and "has_cards" not in status:
+        pool = [f for f in files if f["status"] == "OK"][:6]
+        if len(pool) < 4:  # few confirmed files: top up with others so the test means something
+            pool += [f for f in files if f["status"] not in ("OK", "ERROR")][:6 - len(pool)]
+        ctx.log(f"Title cards: checking {len(pool)} files to see whether this series shows "
+                "episode titles on screen…")
+        hits = 0
+        for n, f in enumerate(pool):
+            ctx.check_cancel()
+            ctx.progress(n / max(1, len(pool)), f"Title cards (probe): {Path(f['rel']).name}")
+            confirmed = {sg["code"] for sg in f["segments"] if sg.get("confidence") == "high"}
+            cards = run(f, None)
+            # A confirmed file's card must agree with it; for unconfirmed files any
+            # readable episode title counts as "this show has title cards".
+            if cards and (f["status"] != "OK" or any(c["code"] in confirmed for c in cards)):
+                hits += 1
+            report(f, cards, _apply_title_cards(f, cards))
+            done.add(f["rel"])
+        has = bool(pool) and hits >= max(2, (len(pool) + 1) // 2)
+        status = {"has_cards": has, "probed": len(pool), "hits": hits}
+        if has:
+            status["window"] = learn()
+        opts["title_cards_status"] = status
+        db.update_series(series["id"], options=opts)
+        if has:
+            w = status.get("window")
+            ctx.log(f"Title cards: found on {hits}/{len(pool)} probe files"
+                    + (f" (usually {_fmt_t(w[0])}–{_fmt_t(w[1])} into an episode)" if w else "")
+                    + " — using them.")
+        else:
+            ctx.log(f"Title cards: found on {hits}/{len(pool)} probe files — not used for this "
+                    "series. (Force them on under Series options.)")
+            return
+    elif mode == "auto" and not status.get("has_cards"):
+        return
+
+    todo = [f for f in files if f["rel"] not in done and f["status"] != "ERROR"
+            and (scope_all or f["status"] != "OK")]
+    if not todo:
+        return
+    ctx.log(f"Title cards: checking {len(todo)} files"
+            + ("" if scope_all else " the dialogue match didn't already confirm") + ".")
+    use_vision = llm.vision_available()
+    for n, f in enumerate(todo):
+        ctx.check_cancel()
+        ctx.progress(n / len(todo), f"Title cards: {Path(f['rel']).name}")
+        cards = run(f, learn())
+        if not cards and use_vision:
+            cards = _vision_card(root / f["rel"], f, index, series["name"], ctx)
+        report(f, cards, _apply_title_cards(f, cards))
+    if mode == "on" or status.get("has_cards"):
+        w = learn()
+        if w and w != status.get("window"):
+            status["window"] = w
+            opts = dict(db.get_series(series["id"])["options"] or {})
+            opts["title_cards_status"] = status
+            db.update_series(series["id"], options=opts)
+
+
+def _vision_card(video: Path, f: dict, index, series_name: str, ctx) -> list[dict]:
+    full = float(get_settings()["titlecard_scan_seconds"])
+    dur = float(f.get("duration") or 0)
+    frames = titlecard.vision_frames(video, 0.0, min(full, max(10.0, dur)))
+    if not frames:
+        return []
+    try:
+        text = llm.read_title_card([b for _, b in frames], series_name)
+    except Exception as e:  # noqa: BLE001
+        ctx.log(f"  vision model error: {e}")
+        return []
+    m = index.best(text) if text else None
+    if not m or m[2] < 0.82 or m[2] - m[3] < 0.08:
+        return []
+    return [{"code": m[0], "title": m[1], "text": f"{text} (vision)", "score": round(m[2], 3),
+             "time": frames[0][0], "frames": 1}]
 
 
 def _llm_pass(series, files, eps, refs, ctx):

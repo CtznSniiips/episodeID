@@ -39,6 +39,12 @@ SCHEMA: dict[str, tuple[object, str, bool]] = {
     "llm_base_url": ("http://ollama:11434/v1", "LLM_BASE_URL", False),
     "llm_api_key": ("", "LLM_API_KEY", True),
     "llm_model": ("qwen3:8b", "LLM_MODEL", False),
+    # Title cards (OCR of the episode title shown on screen)
+    "titlecard_enabled": (True, "TITLECARD_ENABLED", False),
+    "titlecard_scan_seconds": (180, "TITLECARD_SCAN_SECONDS", False),
+    "titlecard_fps": (1.0, "TITLECARD_FPS", False),
+    "titlecard_vision": (False, "TITLECARD_VISION", False),
+    "llm_vision_model": ("", "LLM_VISION_MODEL", False),
     # Sonarr
     "sonarr_url": ("", "SONARR_URL", False),
     "sonarr_api_key": ("", "SONARR_API_KEY", True),

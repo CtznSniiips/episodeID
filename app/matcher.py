@@ -167,9 +167,9 @@ class Matcher:
 
 
 def classify(expected: list[str], segments: list[dict], text_source: str) -> tuple[str, str]:
-    if text_source == "none":
-        return "NO_TEXT", "No subtitles and no transcription available"
     if not segments:
+        if text_source == "none":
+            return "NO_TEXT", "No subtitles and no transcription available"
         return "NO_MATCH", "Dialogue did not match any reference"
     detected = [s["code"] for s in segments]
     if any(s["confidence"] != "high" for s in segments):

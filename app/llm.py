@@ -83,3 +83,43 @@ def judge(dialogue: str, candidates: list[dict], series_name: str) -> dict | Non
         conf = 0.0
     return {"code": code.upper(), "confidence": round(conf, 2),
             "reason": str(data.get("reason") or "")[:300]}
+
+
+def vision_available() -> bool:
+    s = get_settings()
+    return bool(available() and s["titlecard_vision"])
+
+
+def read_title_card(images: list[bytes], series_name: str) -> str | None:
+    """Ask a vision-capable model to transcribe an episode title card.
+    It only transcribes; matching the text to an episode happens in our code,
+    so the model can't 'pick' an episode it merely guessed."""
+    import base64
+    s = get_settings()
+    content: list[dict] = [{"type": "text", "text": (
+        f"These are frames from an episode of {series_name}. If any frame shows the "
+        "episode's title card (the episode name written on screen, usually large), "
+        "transcribe the episode title exactly as written. Ignore the series logo, "
+        "channel logos, credits and signs in the scene. Reply with JSON only: "
+        '{"title": "..."} or {"title": null} if no frame shows an episode title.')}]
+    for img in images:
+        content.append({"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(img).decode()}})
+    base = s["llm_base_url"].rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    if s["llm_api_key"]:
+        headers["Authorization"] = f"Bearer {s['llm_api_key']}"
+    body = {"model": s["llm_vision_model"] or s["llm_model"], "temperature": 0,
+            "max_tokens": 1000, "messages": [{"role": "user", "content": content}]}
+    r = httpx.post(f"{base}/chat/completions", json=body, headers=headers, timeout=300)
+    if r.status_code != 200:
+        raise RuntimeError(f"Vision request failed ({r.status_code}): {r.text[:200]}")
+    raw = re.sub(r"(?s)<think>.*?</think>", "", r.json()["choices"][0]["message"]["content"] or "")
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        return None
+    try:
+        title = json.loads(m.group(0)).get("title")
+    except json.JSONDecodeError:
+        return None
+    return str(title).strip() if title else None

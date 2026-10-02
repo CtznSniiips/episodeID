@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, db, jobs, llm, tvdb
+from . import __version__, db, jobs, llm, titlecard, tvdb
 from . import pipeline  # noqa: F401  (registers job handlers)
 from .config import (CACHE_DIR, MEDIA_ROOT, env_locked_keys, get_settings, public_settings,
                      safe_media_path, save_settings)
@@ -45,6 +45,7 @@ def status():
     return {"version": __version__, "media_root": str(MEDIA_ROOT),
             "tvdb": bool(s["tvdb_api_key"]), "opensubtitles": bool(s["opensubtitles_api_key"]),
             "llm": llm.available(), "whisper": s["whisper_enabled"],
+            "titlecards": bool(s["titlecard_enabled"] and titlecard.available()),
             "sonarr": bool(s["sonarr_url"] and s["sonarr_api_key"])}
 
 
@@ -292,11 +293,13 @@ def series_options(sid: int, body: dict):
     s = db.get_series(sid) or _404()
     opts = dict(s["options"] or {})
     for k in ("fandom_wiki", "fandom_page_pattern", "fandom_title_overrides",
-              "include_specials", "name_in_files"):
+              "include_specials", "name_in_files", "title_cards", "title_cards_scope"):
         if k in body:
             opts[k] = body[k]
     if "fandom_wiki" in body:
         opts["fandom_checked"] = True  # the user decided; don't auto-detect over it
+    if body.get("title_cards") == "auto" and (s["options"] or {}).get("title_cards") not in (None, "auto"):
+        opts.pop("title_cards_status", None)  # switching back to auto: test again
     if "imdb_id" in body:
         db.update_series(sid, imdb_id=(body["imdb_id"] or None))
     db.update_series(sid, options=opts)
