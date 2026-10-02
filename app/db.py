@@ -150,6 +150,16 @@ def latest_scan(series_id: int) -> dict | None:
     return _row(r, ("results",))
 
 
+def latest_scan_summary(series_id: int) -> dict | None:
+    """Created time and status counts of the latest scan, without loading its results."""
+    r = conn().execute(
+        "SELECT id, created, json_extract(results, '$.counts') AS counts FROM scans "
+        "WHERE series_id=? ORDER BY id DESC LIMIT 1", (series_id,)).fetchone()
+    if r is None:
+        return None
+    return {"id": r["id"], "created": r["created"], "counts": json.loads(r["counts"] or "{}")}
+
+
 def add_plan(series_id: int, scan_id: int | None, items: list) -> int:
     return conn().execute(
         "INSERT INTO plans (series_id, scan_id, created, items) VALUES (?,?,?,?)",
@@ -227,9 +237,14 @@ def append_job_log(job_id: int, line: str) -> None:
     conn().execute("UPDATE jobs SET log = log || ? WHERE id=?", (line + "\n", job_id))
 
 
-def get_job(job_id: int) -> dict | None:
+def get_job(job_id: int, tail: int | None = None) -> dict | None:
     r = conn().execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    return _row(r, ("params", "result"))
+    job = _row(r, ("params", "result"))
+    if job and tail:
+        lines = job["log"].splitlines()
+        job["log_lines"] = len(lines)
+        job["log"] = "\n".join(lines[-tail:])
+    return job
 
 
 def list_jobs(series_id: int | None = None, limit: int = 30) -> list[dict]:

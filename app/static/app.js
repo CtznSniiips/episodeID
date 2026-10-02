@@ -277,7 +277,7 @@ async function watchJobs() {
     if (!box) return clearInterval(pollTimer);
     if (!j) { box.innerHTML = ""; return; }
     const active = j.status === "queued" || j.status === "running";
-    const full = await api(`/api/jobs/${j.id}`);
+    const full = await api(`/api/jobs/${j.id}?tail=300`);
     const pct = Math.round((full.progress || 0) * 100);
     const badge = { done: "b-ok", failed: "b-bad", cancelled: "", running: "b-info", queued: "" }[j.status];
     box.innerHTML = `<div class="card job">
@@ -287,7 +287,7 @@ async function watchJobs() {
         ${active ? `<button class="btn small danger" id="cancel-job">Cancel</button>` :
           `<button class="btn small" id="hide-job">Hide</button>`}</div>
       ${active ? `<div class="bar" style="margin-top:8px"><div style="width:${pct}%"></div></div>` : ""}
-      <pre id="joblog">${esc(full.log.split("\n").slice(-300).join("\n"))}</pre></div>`;
+      <pre id="joblog">${full.log_lines > 300 ? `… ${full.log_lines - 300} earlier lines\n` : ""}${esc(full.log)}</pre></div>`;
     const pre = $("#joblog");
     pre.scrollTop = pre.scrollHeight;
     const c = $("#cancel-job");
@@ -346,8 +346,8 @@ function segHtml(sg, eps) {
   return h + `</span>`;
 }
 
-async function tabPlan() {
-  const plan = await api(`/api/series/${state.series.id}/plan`);
+async function tabPlan(reload = true) {
+  const plan = reload || !state.plan ? await api(`/api/series/${state.series.id}/plan`) : state.plan;
   state.plan = plan;
   const tab = $("#tab");
   if (!plan.id) {
@@ -379,7 +379,7 @@ async function tabPlan() {
       ${shown.map((it) => rowHtml(it, eps, applied)).join("")}</tbody></table>` :
       `<div class="empty">Nothing here.</div>`}`;
 
-  $$(".filters .btn", tab).forEach((b) => b.onclick = () => { state.filter = b.dataset.f; tabPlan(); });
+  $$(".filters .btn", tab).forEach((b) => b.onclick = () => { state.filter = b.dataset.f; tabPlan(false); });
   $$("input.sel", tab).forEach((cb) => cb.onchange = async () => {
     await api(`/api/plans/${plan.id}/selection`, { method: "PATCH",
       body: { selected: { [cb.dataset.id]: cb.checked } } }).catch(fail);

@@ -15,6 +15,7 @@ import difflib
 import html
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -104,12 +105,12 @@ _NAV_LINE = re.compile(r"(?:[^|\n]{2,80}\|){3,}")  # "Ep A | Ep B | Ep C | …" 
 MIN_TRANSCRIPT_WORDS = 250
 
 
-def transcript_quality(raw: str) -> tuple[bool, str]:
+def transcript_quality(raw: str, cleaned: str | None = None) -> tuple[bool, str]:
     """Is this wiki page an actual transcript? Stub pages ("The transcript for this
     episode isn't available yet") are mostly an episode-list navbox, which would look
     like a reference to the matcher — and every stub shares the same navbox."""
     labelled, _ = transcript_stats(_WIKI.sub(r"\1", raw))
-    words = len(clean_transcript(raw).split())
+    words = len((cleaned if cleaned is not None else clean_transcript(raw)).split())
     if labelled >= 15 and words >= MIN_TRANSCRIPT_WORDS:
         return True, ""
     if _STUB.search(raw):
@@ -119,38 +120,81 @@ def transcript_quality(raw: str) -> tuple[bool, str]:
     return False, f"wiki page has no usable transcript ({labelled} dialogue lines, {words} words)"
 
 
+_ref_cache: dict[str, tuple[int, int, dict | None]] = {}
+_ref_cache_lock = threading.Lock()
+
+
+def _load_ref_file(f: Path) -> dict | None:
+    """One reference file → {"source", "text" (cleaned), ...} or None if unusable.
+    Parsed, quality-checked and cleaned once per file version (cached by mtime+size),
+    because the series pages ask for every reference's status on every load."""
+    try:
+        st = f.stat()
+    except OSError:
+        return None
+    key = str(f)
+    with _ref_cache_lock:
+        hit = _ref_cache.get(key)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    entry: dict | None = None
+    if f.suffix == ".json":
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        if data.get("text"):
+            if data.get("source") == "fandom":
+                cleaned = clean_transcript(data["text"])
+                if transcript_quality(data["text"], cleaned)[0]:
+                    entry = {**data, "text": cleaned}
+                # else: a stub page cached by an older version; re-fetched next time
+            else:
+                entry = data
+    else:
+        raw = read_text_file(f)
+        if f.suffix.lower() == ".txt":
+            text = clean_transcript(raw)
+        else:
+            text = " ".join(c.text for c in parse_subtitle_text(raw, f.suffix.lower()))
+        if text.strip():
+            entry = {"source": f"manual:{f.name}", "text": text}
+    with _ref_cache_lock:
+        _ref_cache[key] = (st.st_mtime_ns, st.st_size, entry)
+    return entry
+
+
 def load_refs(tvdb_id: int) -> dict[str, dict]:
     """code -> {"source", "text", ...}. Manual files override cached downloads.
     Transcript text (Fandom, manual .txt) is cleaned to dialogue here, at load time,
-    so references cached by older versions benefit without being re-downloaded."""
+    so references cached by older versions benefit without being re-downloaded.
+    Callers get the cached dicts — treat them as read-only."""
     out: dict[str, dict] = {}
     d = refs_dir(tvdb_id)
     if d.exists():
         for f in d.glob("S*E*.json"):
-            try:
-                data = json.loads(f.read_text())
-            except json.JSONDecodeError:
-                continue
-            if data.get("text"):
-                if data.get("source") == "fandom":
-                    if not transcript_quality(data["text"])[0]:
-                        continue  # cached stub page from an older version; re-fetched next time
-                    data["text"] = clean_transcript(data["text"])
-                out[f.stem] = data
+            entry = _load_ref_file(f)
+            if entry:
+                out[f.stem] = entry
     md = manual_dir(tvdb_id)
     if md.exists():
         for f in md.iterdir():
             m = re.match(r"(?i)s(\d+)e(\d+)", f.name)
             if not m or f.suffix.lower() not in SUB_EXTS + (".txt",):
                 continue
-            raw = read_text_file(f)
-            if f.suffix.lower() == ".txt":
-                text = clean_transcript(raw)
-            else:
-                text = " ".join(c.text for c in parse_subtitle_text(raw, f.suffix.lower()))
-            if text.strip():
-                out[ep_code(int(m[1]), int(m[2]))] = {"source": f"manual:{f.name}", "text": text}
+            entry = _load_ref_file(f)
+            if entry:
+                out[ep_code(int(m[1]), int(m[2]))] = entry
     return out
+
+
+def warm_reference_cache() -> None:
+    """Read every series' references once at startup so the first page load is fast."""
+    root = CACHE_DIR / "refs"
+    if root.exists():
+        for d in root.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                load_refs(int(d.name))
 
 
 def _save(tvdb_id: int, code: str, data: dict) -> None:

@@ -31,6 +31,9 @@ def _startup():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     db.init()
     jobs.start()
+    import threading
+    from .references import warm_reference_cache
+    threading.Thread(target=warm_reference_cache, name="warm-refs", daemon=True).start()
 
 
 def _404(what="Not found"):
@@ -282,9 +285,8 @@ def _series_out(s: dict, full: bool = False) -> dict:
     out["reference_count"] = sum(1 for e in regular
                                  if ep_code(e["season"], e["episode"]) in refs)
     out["active_job"] = db.active_job(s["id"])
-    scan = db.latest_scan(s["id"])
-    out["last_scan"] = {"created": scan["created"], "counts": scan["results"]["counts"]} \
-        if scan else None
+    scan = db.latest_scan_summary(s["id"])
+    out["last_scan"] = {"created": scan["created"], "counts": scan["counts"]} if scan else None
     if full:
         misses = _load_misses(s["tvdb_id"])
         out["episodes"] = [{
@@ -425,8 +427,8 @@ def jobs_list(series_id: int | None = None):
 
 
 @app.get("/api/jobs/{jid}")
-def job_get(jid: int):
-    return db.get_job(jid) or _404()
+def job_get(jid: int, tail: int | None = None):
+    return db.get_job(jid, tail) or _404()
 
 
 @app.post("/api/jobs/{jid}/cancel")
