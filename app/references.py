@@ -90,10 +90,33 @@ def clean_transcript(text: str) -> str:
             if m:
                 out.append(m.group(2))
     else:
-        out = text.splitlines()
+        out = [l for l in text.splitlines() if not _NAV_LINE.search(l)]
     joined = " ".join(_DIRECTION.sub(" ", l) for l in out)
     joined = re.sub(r"\([^)]{0,80}\)", " ", joined)
     return re.sub(r"\s+", " ", joined).strip()
+
+
+_STUB = re.compile(
+    r"(?i)\bis a stub\b|transcript (for this episode )?(isn'?t|is not) (available|complete)|"
+    r"help the .{0,40}wiki by adding|this transcript is (empty|incomplete)|no transcript (yet|available)")
+_NAV_LINE = re.compile(r"(?:[^|\n]{2,80}\|){3,}")  # "Ep A | Ep B | Ep C | …" navigation lists
+
+MIN_TRANSCRIPT_WORDS = 250
+
+
+def transcript_quality(raw: str) -> tuple[bool, str]:
+    """Is this wiki page an actual transcript? Stub pages ("The transcript for this
+    episode isn't available yet") are mostly an episode-list navbox, which would look
+    like a reference to the matcher — and every stub shares the same navbox."""
+    labelled, _ = transcript_stats(_WIKI.sub(r"\1", raw))
+    words = len(clean_transcript(raw).split())
+    if labelled >= 15 and words >= MIN_TRANSCRIPT_WORDS:
+        return True, ""
+    if _STUB.search(raw):
+        return False, "wiki transcript is a stub"
+    if labelled < 15 and words >= 4 * MIN_TRANSCRIPT_WORDS:
+        return True, ""  # long unlabelled transcript (some wikis don't name speakers)
+    return False, f"wiki page has no usable transcript ({labelled} dialogue lines, {words} words)"
 
 
 def load_refs(tvdb_id: int) -> dict[str, dict]:
@@ -110,6 +133,8 @@ def load_refs(tvdb_id: int) -> dict[str, dict]:
                 continue
             if data.get("text"):
                 if data.get("source") == "fandom":
+                    if not transcript_quality(data["text"])[0]:
+                        continue  # cached stub page from an older version; re-fetched next time
                     data["text"] = clean_transcript(data["text"])
                 out[f.stem] = data
     md = manual_dir(tvdb_id)
@@ -477,14 +502,23 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
             ctx.check_cancel()
             code = ep_code(ep["season"], ep["episode"])
             ctx.progress(i / len(work), f"References: {code} {ep['title']}")
-            ref, note, fandom_status = None, "", None
+            ref, note, fandom_status, stub_note = None, "", None, ""
             # Fandom first when configured: it costs no download quota.
             if wiki:
                 page = overrides.get(code) or page_map.get(code) or pattern.format(
                     title=ep["title"], season=ep["season"], episode=ep["episode"])
                 text, fandom_status = fandom_page(wiki, page)
                 if text:
-                    ref, note = {"source": "fandom", "text": text, "page": page}, f"fandom {page}"
+                    good, why = transcript_quality(text)
+                    if good:
+                        ref, note = {"source": "fandom", "text": text, "page": page}, f"fandom {page}"
+                    else:
+                        fandom_status, stub_note = "missing", why
+                        note = why
+                        ctx.log(f"{code} · {page}: {why} — trying other sources")
+                        cached = _read_cached(tvdb_id, code)
+                        if not is_upgrade and cached and cached.get("source") == "fandom":
+                            (refs_dir(tvdb_id) / f"{code}.json").unlink(missing_ok=True)
                 elif fandom_status == "error":
                     note = f"wiki unreachable for {page} — will retry next fetch"
 
@@ -520,6 +554,8 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                             "already-downloaded episodes are cached.")
                 except Exception as e:  # noqa: BLE001
                     note = f"error: {e}"
+            if ref is None and stub_note and not note.startswith("error"):
+                note = f"{stub_note}; {note or 'no other source'}" if note != stub_note else stub_note
             if ref:
                 if ref.get("source") == "opensubtitles" and fandom_status == "missing":
                     ref["fandom_tried"] = True

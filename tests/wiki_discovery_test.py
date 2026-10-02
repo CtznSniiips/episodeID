@@ -104,7 +104,7 @@ assert fandom.discover("Some Obscure Drama", eps(["Pilot", "Second"])) is None
 # --- end to end: discovery on fetch, then references come from the mapped pages
 fetched = []
 references.fandom_page = lambda wiki, page: (fetched.append(page) or
-                                             "\n".join(f"Gumball: line {i} of {page}" for i in range(40)),
+                                             "\n".join(f"Gumball: this is spoken line number {i} of the transcript page {page}" for i in range(40)),
                                              "ok")
 db.init()
 sid = db.add_series(1, "The Amazing World of Gumball", "2011", str(W), None)
