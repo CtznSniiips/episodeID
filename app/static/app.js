@@ -111,83 +111,96 @@ async function renderHome() {
     }).join("") + `</div>`;
   }
   view.innerHTML = html;
-  $("#add").onclick = addSeriesDialog;
+  $("#add").onclick = () => addSeriesDialog();
   $$(".series-card").forEach((c) => c.onclick = () => location.hash = `#/series/${c.dataset.id}`);
 }
 
-async function addSeriesDialog(prefill = "") {
+async function addSeriesDialog() {
   const box = modal(`<h2 style="margin-top:0">Add series</h2>
-    <div class="row"><input type="search" id="q" placeholder="Search TVDB, e.g. The Amazing World of Gumball"
-      value="${esc(prefill)}" class="grow-input" autocomplete="off">
-      <button class="btn primary" id="search">Search</button></div>
+    <input type="search" id="q" placeholder="Search your library, e.g. gumball" class="grow-input" style="width:100%" autocomplete="off">
     <div id="results" style="margin-top:10px"></div>
     <div id="step2"></div>
-    <div class="row" style="margin-top:12px"><div class="spacer"></div><button class="btn" id="cancel">Cancel</button></div>`);
+    <div class="row" style="margin-top:12px"><a id="browse" style="cursor:pointer" class="small">Browse folders instead…</a>
+      <div class="spacer"></div><button class="btn" id="cancel">Cancel</button></div>
+    <div id="browser"></div>`);
   $("#cancel", box).onclick = closeModal;
   const q = $("#q", box);
   q.focus();
+  let timer = null, seq = 0;
 
-  async function search() {
-    const text = q.value.trim();
-    if (!text) return;
+  async function list() {
+    const my = ++seq;
     $("#step2", box).innerHTML = "";
-    $("#results", box).innerHTML = `<div class="list"><div class="item muted">Searching…</div></div>`;
     try {
-      const res = await api(`/api/tvdb/search?q=${encodeURIComponent(text)}`);
-      $("#results", box).innerHTML = `<div class="list">${res.map((r, i) => `<div class="item" data-i="${i}">
-        ${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : `<img alt="">`}
-        <div style="flex:1"><b>${esc(r.name)}</b> <span class="muted">${esc(r.year)}${r.network ? " · " + esc(r.network) : ""} · tvdb ${r.tvdb_id}</span>
-        ${r.added_id ? ` <span class="badge b-ok">added</span>` : ""}
-        <div class="small muted">${esc((r.overview || "").slice(0, 180))}</div></div></div>`).join("") ||
-        `<div class="item muted">No results on TVDB.</div>`}</div>`;
+      const r = await api(`/api/folders/search?q=${encodeURIComponent(q.value.trim())}`);
+      if (my !== seq) return;  // a newer keystroke already answered
+      const res = r.results;
+      $("#results", box).innerHTML = `<div class="list">${res.map((f, i) => `<div class="item" data-i="${i}">
+        📁 <div style="flex:1"><b>${esc(f.name)}</b> ${f.year ? `<span class="muted">${esc(f.year)}</span>` : ""}
+          ${f.tvdb_id ? `<span class="badge b-info">tvdb ${f.tvdb_id}</span>` : ""}
+          ${f.added_id ? `<span class="badge b-ok">added</span>` : ""}
+          <div class="path muted">${esc(f.path)}</div></div></div>`).join("") ||
+        `<div class="item muted">No folders in your library match “${esc(q.value)}”.</div>`}</div>
+        ${r.total > res.length ? `<div class="small muted" style="margin-top:4px">${r.total - res.length} more — keep typing to narrow down.</div>` : ""}`;
       $$("#results .item[data-i]", box).forEach((el) => el.onclick = () => {
-        const r = res[+el.dataset.i];
-        if (r.added_id) { closeModal(); location.hash = `#/series/${r.added_id}`; return; }
-        chooseFolder(r);
+        const f = res[+el.dataset.i];
+        if (f.added_id) { closeModal(); location.hash = `#/series/${f.added_id}`; return; }
+        identify(f.path);
       });
-    } catch (e) {
-      $("#results", box).innerHTML = `<div class="card">⚠ ${esc(e.message)}${
-        /key/i.test(e.message) ? ` — add it in <a href="#/settings" onclick="closeModal()">Settings</a>.` : ""}</div>`;
-    }
+    } catch (e) { $("#results", box).innerHTML = `<div class="card">⚠ ${esc(e.message)}</div>`; }
   }
-  $("#search", box).onclick = search;
-  q.onkeydown = (e) => { if (e.key === "Enter") search(); };
-  if (prefill) search();
+  q.oninput = () => { clearTimeout(timer); timer = setTimeout(list, 150); };
+  q.onkeydown = (e) => { if (e.key === "Enter") { clearTimeout(timer); list(); } };
+  list();
+  $("#browse", box).onclick = () => browseFolders($("#browser", box), identify);
 
-  async function add(show, path) {
+  async function add(path, tvdbId) {
     try {
-      const s = await api("/api/series", { method: "POST", body: { path, tvdb_id: show.tvdb_id } });
+      const s = await api("/api/series", { method: "POST", body: { path, tvdb_id: tvdbId } });
       closeModal();
       location.hash = `#/series/${s.id}`;
     } catch (e) { fail(e); }
   }
 
-  async function chooseFolder(show) {
-    $("#results", box).innerHTML = `<div class="card row">
-      ${show.image ? `<img src="${esc(show.image)}" alt="" style="width:40px;height:58px;object-fit:cover;border-radius:4px">` : ""}
-      <div style="flex:1"><b>${esc(show.name)}</b> <span class="muted">${esc(show.year)} · tvdb ${show.tvdb_id}</span></div>
-      <button class="btn small" id="back">Change</button></div>`;
-    $("#back", box).onclick = search;
+  function showCandidates(step, path, results, best) {
+    $("#cands", step).innerHTML = results.map((r, i) => `<div class="item" data-i="${i}" ${i === 0 && best ? 'style="background:var(--panel-2)"' : ""}>
+        ${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : `<img alt="">`}
+        <div style="flex:1"><b>${esc(r.name)}</b> <span class="muted">${esc(r.year)}${r.network ? " · " + esc(r.network) : ""} · tvdb ${r.tvdb_id}</span>
+          ${i === 0 && best ? ` <span class="badge b-ok">best match</span>` : ""}
+          <div class="small muted">${esc((r.overview || "").slice(0, 160))}</div></div>
+        <button class="btn small ${i === 0 && best ? "primary" : ""}">Add</button></div>`).join("") ||
+      `<div class="item muted">No TVDB results — try different words above.</div>`;
+    $$("#cands .item[data-i]", step).forEach((el) => el.onclick = () => add(path, results[+el.dataset.i].tvdb_id));
+  }
+
+  async function identify(path) {
+    $("#results", box).innerHTML = "";
+    $("#browser", box).innerHTML = "";
     const step = $("#step2", box);
-    step.innerHTML = `<h2>Which folder is it in?</h2><div class="list"><div class="item muted">Looking in your library…</div></div>`;
-    let sug = [];
-    try {
-      sug = await api(`/api/folders/suggest?name=${encodeURIComponent(show.name)}&tvdb_id=${show.tvdb_id}&year=${encodeURIComponent(show.year || "")}`);
-    } catch (e) { fail(e); }
-    step.innerHTML = `<h2>Which folder is it in?</h2>
-      ${sug.length ? `<div class="list">${sug.map((f, i) => `<div class="item" data-i="${i}" ${f.added ? 'style="opacity:.55;cursor:default"' : ""}>
-        📁 <div style="flex:1"><span class="path">${esc(f.path)}</span>
-        <div class="small muted">${f.videos} video files${f.added ? " · already added" : ""}</div></div>
-        ${f.added ? "" : `<button class="btn small primary">Add</button>`}</div>`).join("")}</div>` :
-        `<div class="muted small">No folder named like “${esc(show.name)}” was found under /media.</div>`}
-      <div style="margin-top:10px"><a id="browse" style="cursor:pointer">Browse for a different folder…</a></div>
-      <div id="browser"></div>`;
-    $$(".item[data-i]", step).forEach((el) => {
-      const f = sug[+el.dataset.i];
-      if (!f.added) el.onclick = () => add(show, f.path);
-    });
-    $("#browse", step).onclick = () => browseFolders($("#browser", step), (path) => add(show, path));
-    if (!sug.length) $("#browse", step).click();
+    step.innerHTML = `<div class="card muted">Identifying ${esc(path)} on TVDB…</div>`;
+    let r;
+    try { r = await api(`/api/folders/resolve?path=${encodeURIComponent(path)}`); }
+    catch (e) {
+      step.innerHTML = `<div class="card">⚠ ${esc(e.message)}${/key/i.test(e.message) ?
+        ` — add your TVDB key in <a href="#/settings" onclick="closeModal()">Settings</a>.` : ""}</div>`;
+      return;
+    }
+    step.innerHTML = `<div class="card" style="margin-bottom:10px">📁 <b>${esc(r.folder)}</b>
+        <span class="muted small">· ${r.videos} video files</span> <a class="small" id="change" style="cursor:pointer">change folder</a></div>
+      <h2 style="margin:0 0 6px">${r.confident ? "Is this the show?" : "Which show is this?"}</h2>
+      <div class="muted small" style="margin-bottom:8px">${r.tvdb_id_tag ? `The folder is tagged tvdb ${r.tvdb_id_tag}.` :
+        `Matched on TVDB by the folder name${r.year ? " and year" : ""}.`} EpisodeID uses TVDB's episode list and numbering, the same as Sonarr.</div>
+      <div class="list" id="cands"></div>
+      <div class="row" style="margin-top:8px"><input type="search" id="tq" value="${esc(r.query)}" class="grow-input" placeholder="Search TVDB">
+        <button class="btn" id="tsearch">Search TVDB</button></div>`;
+    $("#change", step).onclick = () => { step.innerHTML = ""; list(); };
+    showCandidates(step, r.path, r.results, r.confident);
+    const tsearch = async () => {
+      try { showCandidates(step, r.path, await api(`/api/tvdb/search?q=${encodeURIComponent($("#tq", step).value)}`), false); }
+      catch (e) { fail(e); }
+    };
+    $("#tsearch", step).onclick = tsearch;
+    $("#tq", step).onkeydown = (e) => { if (e.key === "Enter") tsearch(); };
   }
 }
 

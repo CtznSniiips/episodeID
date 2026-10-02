@@ -160,53 +160,104 @@ def _video_count(p: Path, limit: int = 2000) -> int:
     return n
 
 
-@app.get("/api/folders/suggest")
-def suggest_folders(name: str, tvdb_id: int | None = None, year: str = ""):
-    """Folders under the media root that look like this series, best first.
-    Walks a few levels (e.g. /media/tv/<Show>) and never descends into season folders."""
-    from .references import norm_title, titles_match
-    used = {s["path"] for s in db.list_series()}
-    want = norm_title(name)
-    found = []
+_folder_cache: dict = {"at": 0.0, "items": []}
+
+
+def _show_folders() -> list[dict]:
+    """Every folder in the library that looks like a show: it holds season folders or
+    video files directly. Parent folders (e.g. /media/tv) are searched up to 3 levels.
+    Cached for a minute so typing in the search box stays instant."""
+    import time
+    if time.time() - _folder_cache["at"] < 60:
+        return _folder_cache["items"]
+    out = []
     stack = [(MEDIA_ROOT, 0)]
-    seen = 0
-    while stack and seen < 20000:
+    while stack and len(out) < 20000:
         d, depth = stack.pop()
         try:
-            entries = sorted(os.scandir(d), key=lambda e: e.name.lower())
+            entries = [e for e in os.scandir(d) if e.is_dir(follow_symlinks=True)
+                       and not e.name.startswith((".", "_episodeid", "@", "#"))]
         except OSError:
             continue
         for e in entries:
-            if not e.is_dir(follow_symlinks=False) or e.name.startswith((".", "_episodeid")):
+            try:
+                kids = list(os.scandir(e.path))
+            except OSError:
                 continue
-            seen += 1
-            if _SEASON_DIR.match(e.name.strip()):
-                continue
-            folder = e.name
-            score = 0
-            if tvdb_id and re.search(rf"[\[{{(]tvdb(?:id)?[-= ]{tvdb_id}[\]}})]", folder, re.I):
-                score = 100
-            else:
-                bare, _ = guess_query(folder)
-                bare = re.sub(r"\s*\b(19|20)\d{2}\b\s*$", "", bare)
-                nb = norm_title(bare)
-                if nb == want:
-                    score = 90
-                elif titles_match(bare, name):
-                    score = 70
-                if score and year and str(year) in folder:
-                    score += 5
-            if score:
-                p = Path(e.path)
-                found.append({"path": str(p.relative_to(MEDIA_ROOT)), "name": folder,
-                              "score": score, "added": str(p.resolve()) in used})
+            is_show = any(k.is_dir() and _SEASON_DIR.match(k.name.strip()) for k in kids) or \
+                any(k.is_file() and Path(k.name).suffix.lower() in VIDEO_EXTS for k in kids)
+            if is_show:
+                name, tvdb_id = guess_query(e.name)
+                year = re.search(r"\((19|20)\d{2}\)", e.name)
+                out.append({"path": str(Path(e.path).relative_to(MEDIA_ROOT)), "folder": e.name,
+                            "name": re.sub(r"\s*\b(19|20)\d{2}\b\s*$", "", name).strip() or name,
+                            "year": year.group(0)[1:-1] if year else "", "tvdb_id": tvdb_id})
             elif depth < 3:
                 stack.append((Path(e.path), depth + 1))
-    found.sort(key=lambda f: (-f["score"], f["path"]))
-    found = found[:8]
-    for f in found:
-        f["videos"] = _video_count(MEDIA_ROOT / f["path"])
-    return found
+    out.sort(key=lambda f: f["folder"].lower())
+    _folder_cache.update(at=time.time(), items=out)
+    return out
+
+
+@app.get("/api/folders/search")
+def folders_search(q: str = "", limit: int = 40):
+    """Library folders matching the typed text (all words, any order), best first."""
+    from .references import norm_title
+    used = {s["path"]: s["id"] for s in db.list_series()}
+    words = norm_title(q).split()
+    hits = []
+    for f in _show_folders():
+        hay = norm_title(f["folder"]) + " " + f["path"].lower()
+        if words and not all(w in hay for w in words):
+            continue
+        n = norm_title(f["name"])
+        rank = 0 if n == " ".join(words) else 1 if n.startswith(" ".join(words)) else 2
+        hits.append((rank, f["folder"].lower(), f))
+    hits.sort(key=lambda h: h[:2])
+    out = []
+    for _, _, f in hits[:limit]:
+        added = used.get(str((MEDIA_ROOT / f["path"]).resolve()))
+        out.append({**f, "added_id": added})
+    return {"total": len(hits), "results": out}
+
+
+@app.get("/api/folders/resolve")
+def folders_resolve(path: str):
+    """Work out which TVDB show a folder is. Uses a {tvdb-123} tag when present,
+    otherwise searches TVDB by the folder's name, preferring the folder's year."""
+    p = safe_media_path(path)
+    if not p.is_dir():
+        _404("Folder not found")
+    name, tvdb_id = guess_query(p.name)
+    year_m = re.search(r"\((19|20)\d{2}\)", p.name)
+    year = year_m.group(0)[1:-1] if year_m else ""
+    name = re.sub(r"\s*\b(19|20)\d{2}\b\s*$", "", name).strip() or name
+    from .references import norm_title
+    try:
+        results = tvdb.search_series(name)
+        if tvdb_id and not any(r["tvdb_id"] == tvdb_id for r in results):
+            info = tvdb.series_info(tvdb_id)
+            results.insert(0, {**info, "overview": "", "image": None, "network": ""})
+    except tvdb.TVDBError as e:
+        raise HTTPException(400, str(e))
+
+    def score(r):
+        sc = 0
+        if tvdb_id and r["tvdb_id"] == tvdb_id:
+            sc += 100
+        if norm_title(r["name"]) == norm_title(name):
+            sc += 20
+        if year and str(r.get("year")) == year:
+            sc += 10
+        return sc
+
+    results.sort(key=score, reverse=True)
+    best = results[0] if results else None
+    confident = bool(best) and (score(best) >= 100 or (score(best) >= 20 and (
+        len(results) == 1 or score(results[1]) < score(best))))
+    return {"folder": p.name, "path": str(p.relative_to(MEDIA_ROOT)), "query": name,
+            "year": year, "tvdb_id_tag": tvdb_id, "confident": confident,
+            "videos": _video_count(p), "results": results[:8]}
 
 
 @app.get("/api/guess")
