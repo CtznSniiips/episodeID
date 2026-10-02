@@ -10,7 +10,8 @@ from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import get_dialogue
 from .planner import build_plan, list_videos
-from .references import detect_fandom_wiki, ep_code, load_refs, refresh_references
+from .references import (detect_fandom_wiki, ep_code, load_refs, refresh_references,
+                         verify_flagged)
 
 
 def _series(ctx) -> dict:
@@ -110,6 +111,8 @@ def job_fetch_refs(ctx, params):
     result = refresh_references(series, ctx, force_codes=params.get("codes"),
                                 retry_misses=bool(params.get("retry_misses")),
                                 retry_codes=retry)
+    ctx.status("Cross-checking flagged OpenSubtitles references")
+    result["verification"] = verify_flagged(db.get_series(series["id"]), ctx)
     db.update_series(series["id"], episodes=series["episodes"])  # cached IMDb ids
     return result
 

@@ -292,20 +292,23 @@ def _series_out(s: dict, full: bool = False) -> dict:
         out["episodes"] = [{
             **e, "code": ep_code(e["season"], e["episode"]),
             "ref": (refs.get(ep_code(e["season"], e["episode"])) or {}).get("source"),
-            "ref_note": _ref_note(refs.get(ep_code(e["season"], e["episode"]))),
+            "ref_note": _ref_note(refs.get(ep_code(e["season"], e["episode"])),
+                                  ep_code(e["season"], e["episode"]), e.get("title")),
             "miss": misses.get(ep_code(e["season"], e["episode"])),
         } for e in s["episodes"]]
     return out
 
 
-def _ref_note(ref: dict | None) -> str:
+def _ref_note(ref: dict | None, code: str = "", title: str | None = None) -> str:
     if not ref:
         return ""
     if ref.get("source") == "opensubtitles":
+        from .references import describe_conflict, is_low_trust
         n = f"via {ref.get('via')}"
-        if ref.get("numbering_conflict", not ref.get("title_verified", True)):
-            n += (f" — ⚠ OpenSubtitles has this as {ref.get('os_number')} "
-                  f"'{ref.get('os_title')}'; may be another episode's dialogue")
+        if is_low_trust(ref):
+            n += f" — ⚠ {describe_conflict(ref, code, title)}"
+        elif ref.get("verified"):
+            n += f" — {ref['verified']}"
         return n
     if ref.get("source") == "fandom":
         return ref.get("page", "")

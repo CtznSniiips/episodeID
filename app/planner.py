@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .config import get_settings
 from .media_text import SUB_EXTS, VIDEO_EXTS
-from .references import ref_meta
+from .references import describe_conflict, ref_meta
 
 META_EXTS = {".nfo", ".jpg", ".jpeg", ".png", ".tbn", ".xml"}
 QUALITY_RE = re.compile(
@@ -335,13 +335,12 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
         segs = it.get("segments") or []
         by_title = bool(segs) and all("title" in (sg.get("evidence") or "") for sg in segs)
         if shaky and not by_title and not any(sg.get("override") for sg in segs):
-            details = ", ".join(
-                f"{c} (OpenSubtitles has it as {meta[c].get('os_number')} "
-                f"'{meta[c].get('os_title')}')" for c in shaky)
+            details = "; ".join(describe_conflict(meta[c], c, (eps.get(c) or {}).get("title"))
+                                for c in shaky)
             it["selected"] = False
             it["ref_warning"] = True
-            it["reason"] = (f"Check first — reference numbering disputed for {details}. "
-                            "Upload or re-fetch that reference if this looks wrong.")
+            it["reason"] = (f"Check first — {details}. Fetch references again once more wiki "
+                            "transcripts are in to re-check it, or upload the right subtitle.")
 
     for i, it in enumerate(items):
         it["id"] = i

@@ -395,6 +395,7 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
     fd = a.get("feature_details") or {}
     os_number = f"S{fd.get('season_number') or 0:02d}E{fd.get('episode_number') or 0:02d}"
     conflict = bool(fd.get("episode_number")) and os_number != code or not title_ok
+    os_title_code = title_code(series.get("episodes") or [], fd.get("title") or "")
     raw = os_.download(a["files"][0]["file_id"])
     cues = parse_subtitle_text(raw, ".srt")
     text = " ".join(c.text for c in cues)
@@ -408,6 +409,7 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
         "os_number": os_number,
         "title_verified": bool(title_ok),
         "numbering_conflict": conflict,
+        "os_title_code": os_title_code,
         "subtitle_id": r.get("id"),
     }, how
 
@@ -532,14 +534,96 @@ def _read_cached(tvdb_id: int, code: str) -> dict | None:
         return None
 
 
+def title_code(episodes: list[dict], title: str) -> str | None:
+    """TVDB episode whose title is (nearly) exactly this title, if exactly one is."""
+    want = norm_title(title)
+    if len(want) < 3:
+        return None
+    hits = [ep_code(e["season"], e["episode"]) for e in episodes
+            if norm_title(e.get("title") or "") == want]
+    if not hits:
+        hits = [ep_code(e["season"], e["episode"]) for e in episodes
+                if difflib.SequenceMatcher(None, norm_title(e.get("title") or ""), want).ratio() >= 0.92]
+    return hits[0] if len(hits) == 1 else None
+
+
+def is_low_trust(r: dict) -> bool:
+    return r.get("source") == "opensubtitles" and bool(
+        r.get("numbering_conflict", not r.get("title_verified", True)))
+
+
+def describe_conflict(r: dict, code: str, tvdb_title: str | None = None) -> str:
+    """Plain-language reason an OpenSubtitles reference isn't trusted yet."""
+    os_t, os_n, other = r.get("os_title") or "?", r.get("os_number"), r.get("os_title_code")
+    if os_n and os_n != code:
+        msg = f"OpenSubtitles files this subtitle under {os_n} '{os_t}'"
+    else:
+        msg = (f"OpenSubtitles (IMDb) calls {code} '{os_t}'"
+               + (f" but TVDB calls it '{tvdb_title}'" if tvdb_title else ""))
+    if other and other != code:
+        msg += f"; '{os_t}' is {other} on TVDB"
+    return msg + " — the subtitle may hold another episode's dialogue"
+
+
+def verify_flagged(series: dict, ctx) -> dict:
+    """Settle flagged OpenSubtitles references by comparing their dialogue with
+    trustworthy references (wiki transcripts, manual uploads, unflagged subtitles):
+      * it matches another episode's reference  → it's that episode's dialogue: removed
+      * the episode its IMDb title points at has a reference, and this dialogue
+        clearly isn't it                         → the label was IMDb's ordering: trusted
+      * nothing to compare with yet              → stays flagged, re-checked next fetch"""
+    tvdb_id = series["tvdb_id"]
+    refs = load_refs(tvdb_id)
+    flagged = {c: r for c, r in refs.items() if is_low_trust(r)}
+    trusted = {c: r["text"] for c, r in refs.items() if not is_low_trust(r)}
+    result = {"verified": 0, "removed": 0, "pending": len(flagged)}
+    if not flagged or len(trusted) < 3:
+        return result
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    codes = sorted(trusted)
+    vec = TfidfVectorizer(lowercase=True, strip_accents="unicode", sublinear_tf=True,
+                          stop_words="english", max_df=0.6 if len(codes) >= 10 else 1.0,
+                          token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z']+\b")
+    T = vec.fit_transform([trusted[c] for c in codes])
+    misses = _load_misses(tvdb_id)
+    for code, r in sorted(flagged.items()):
+        sims = (vec.transform([r["text"]]) @ T.T).toarray()[0]
+        order = sims.argsort()[::-1]
+        best_i = next((i for i in order if codes[i] != code), None)
+        best_code, best = (codes[best_i], float(sims[best_i])) if best_i is not None else (None, 0.0)
+        target = r.get("os_title_code")
+        if best_code and best >= 0.35:
+            (refs_dir(tvdb_id) / f"{code}.json").unlink(missing_ok=True)
+            misses[code] = f"OpenSubtitles' subtitle for {code} was {best_code}'s dialogue"
+            result["removed"] += 1
+            result["pending"] -= 1
+            ctx.log(f"{code} ✗ the OpenSubtitles subtitle is {best_code}'s dialogue "
+                    f"(similarity {best:.2f} with its reference) — discarded")
+        elif target and target != code and target in trusted and \
+                float(sims[codes.index(target)]) < 0.15 and best < 0.25:
+            raw = _read_cached(tvdb_id, code)
+            if raw:
+                raw.update(numbering_conflict=False,
+                           verified=f"checked against {target}'s reference: different dialogue")
+                _save(tvdb_id, code, raw)
+            result["verified"] += 1
+            result["pending"] -= 1
+            ctx.log(f"{code} ✓ verified: its dialogue isn't {target} ('{r.get('os_title')}'), so "
+                    "the OpenSubtitles label is just IMDb's ordering")
+    _save_misses(tvdb_id, misses)
+    if result["pending"]:
+        ctx.log(f"{result['pending']} OpenSubtitles references still unverified (no reference "
+                "to compare with yet); renames relying on them won't be pre-ticked.")
+    return result
+
+
 def ref_meta(tvdb_id: int) -> dict[str, dict]:
     """code -> where its reference came from and how far it can be trusted."""
     out = {}
     for code, r in load_refs(tvdb_id).items():
-        low = r.get("source") == "opensubtitles" and bool(
-            r.get("numbering_conflict", not r.get("title_verified", True)))
-        out[code] = {"source": r.get("source", "").split(":")[0], "low_trust": low,
-                     "os_number": r.get("os_number"), "os_title": r.get("os_title")}
+        out[code] = {"source": r.get("source", "").split(":")[0], "low_trust": is_low_trust(r),
+                     "os_number": r.get("os_number"), "os_title": r.get("os_title"),
+                     "os_title_code": r.get("os_title_code")}
     return out
 
 
@@ -664,8 +748,8 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                 fetched += 1
                 warn = ""
                 if ref.get("numbering_conflict"):
-                    warn = (f"  ⚠ OpenSubtitles/IMDb calls this {ref.get('os_number')} "
-                            f"'{ref.get('os_title')}' — numbering differs from TVDB, "
+                    warn = (f"  ⚠ {describe_conflict(ref, code, ep['title'])}; checked against "
+                            "other references at the end of this fetch — until then "
                             "renames relying on it won't be pre-ticked")
                 ctx.log(f"{code} ✓ {note}{warn}")
             elif not os_skipped and not note.startswith("error"):
