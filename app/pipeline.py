@@ -10,7 +10,7 @@ from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import get_dialogue
 from .planner import build_plan, list_videos
-from .references import ep_code, load_refs, refresh_references
+from .references import detect_fandom_wiki, ep_code, load_refs, refresh_references
 
 
 def _series(ctx) -> dict:
@@ -46,6 +46,21 @@ def job_refresh_episodes(ctx, params):
 @handler("fetch_refs")
 def job_fetch_refs(ctx, params):
     series = _ensure_episodes(_series(ctx), ctx)
+    opts = dict(series.get("options") or {})
+    if not opts.get("fandom_wiki") and not opts.get("fandom_checked"):
+        # Free transcripts first: look for a Fandom wiki before touching OpenSubtitles quota.
+        ctx.status("Looking for a Fandom transcript wiki")
+        slug = detect_fandom_wiki(series["name"], series["episodes"], ctx)
+        opts["fandom_checked"] = True
+        if slug:
+            opts["fandom_wiki"] = slug
+            ctx.log(f"Found transcripts on {slug}.fandom.com — using them before OpenSubtitles. "
+                    "(Change this under Series options.)")
+        else:
+            ctx.log("No Fandom transcript wiki found for this series.")
+        db.update_series(series["id"], options=opts)
+        series = db.get_series(series["id"])
+    ctx.status("Fetching references")
     result = refresh_references(series, ctx, force_codes=params.get("codes"),
                                 retry_misses=bool(params.get("retry_misses")))
     db.update_series(series["id"], episodes=series["episodes"])  # cached IMDb ids
@@ -98,6 +113,9 @@ def job_scan(ctx, params):
         det = " + ".join(f"{sg['code']}{'' if sg['confidence'] == 'high' else '?'}"
                          for sg in res["segments"]) or "-"
         ctx.log(f"{status:<16} {rel}  →  {det}")
+        for sg in res["segments"]:
+            if sg.get("why"):
+                ctx.log(f"{'':<16}   {sg['code']}? {sg['why']}")
 
     if llm.available():
         _llm_pass(series, files, eps, refs, ctx)
@@ -120,7 +138,8 @@ def _llm_pass(series, files, eps, refs, ctx):
             (f["status"] in ("LOW_CONFIDENCE", "NO_MATCH"))]
     if not todo:
         return
-    ctx.log(f"AI fallback: checking {len(todo)} unresolved files with {get_settings()['llm_model']}")
+    ctx.log(f"AI fallback: {len(todo)} files the dialogue match couldn't settle "
+            f"(LOW_CONFIDENCE / NO_MATCH) → asking {get_settings()['llm_model']}")
     for n, f in enumerate(todo):
         ctx.check_cancel()
         ctx.progress(n / len(todo), f"AI: {Path(f['rel']).name}")

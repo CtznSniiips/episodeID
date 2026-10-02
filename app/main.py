@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -134,9 +135,77 @@ def guess_query(folder: str) -> tuple[str, int | None]:
 @app.get("/api/tvdb/search")
 def tvdb_search(q: str):
     try:
-        return tvdb.search_series(q)
+        results = tvdb.search_series(q)
     except tvdb.TVDBError as e:
         raise HTTPException(400, str(e))
+    added = {}
+    for s in db.list_series():
+        added.setdefault(s["tvdb_id"], s["id"])
+    for r in results:
+        r["added_id"] = added.get(r["tvdb_id"])
+    return results
+
+
+_SEASON_DIR = re.compile(r"(?i)^(season|series|s)\s*\d+$|^specials$")
+
+
+def _video_count(p: Path, limit: int = 2000) -> int:
+    n = 0
+    for _root, dirs, files in os.walk(p):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_episodeid"))]
+        n += sum(1 for f in files if Path(f).suffix.lower() in VIDEO_EXTS)
+        if n >= limit:
+            break
+    return n
+
+
+@app.get("/api/folders/suggest")
+def suggest_folders(name: str, tvdb_id: int | None = None, year: str = ""):
+    """Folders under the media root that look like this series, best first.
+    Walks a few levels (e.g. /media/tv/<Show>) and never descends into season folders."""
+    from .references import norm_title, titles_match
+    used = {s["path"] for s in db.list_series()}
+    want = norm_title(name)
+    found = []
+    stack = [(MEDIA_ROOT, 0)]
+    seen = 0
+    while stack and seen < 20000:
+        d, depth = stack.pop()
+        try:
+            entries = sorted(os.scandir(d), key=lambda e: e.name.lower())
+        except OSError:
+            continue
+        for e in entries:
+            if not e.is_dir(follow_symlinks=False) or e.name.startswith((".", "_episodeid")):
+                continue
+            seen += 1
+            if _SEASON_DIR.match(e.name.strip()):
+                continue
+            folder = e.name
+            score = 0
+            if tvdb_id and re.search(rf"[\[{{(]tvdb(?:id)?[-= ]{tvdb_id}[\]}})]", folder, re.I):
+                score = 100
+            else:
+                bare, _ = guess_query(folder)
+                bare = re.sub(r"\s*\b(19|20)\d{2}\b\s*$", "", bare)
+                nb = norm_title(bare)
+                if nb == want:
+                    score = 90
+                elif titles_match(bare, name):
+                    score = 70
+                if score and year and str(year) in folder:
+                    score += 5
+            if score:
+                p = Path(e.path)
+                found.append({"path": str(p.relative_to(MEDIA_ROOT)), "name": folder,
+                              "score": score, "added": str(p.resolve()) in used})
+            elif depth < 3:
+                stack.append((Path(e.path), depth + 1))
+    found.sort(key=lambda f: (-f["score"], f["path"]))
+    found = found[:8]
+    for f in found:
+        f["videos"] = _video_count(MEDIA_ROOT / f["path"])
+    return found
 
 
 @app.get("/api/guess")
@@ -206,7 +275,8 @@ def series_add(body: NewSeries):
         sid = db.add_series(body.tvdb_id, info["name"], info["year"], str(p), info["imdb_id"])
     except Exception:  # noqa: BLE001
         raise HTTPException(400, "That folder has already been added")
-    jobs.submit("refresh_episodes", sid)
+    # Loads the TVDB episode list, then fetches references straight away.
+    jobs.submit("fetch_refs", sid)
     return _series_out(db.get_series(sid))
 
 
@@ -224,6 +294,8 @@ def series_options(sid: int, body: dict):
               "include_specials", "name_in_files"):
         if k in body:
             opts[k] = body[k]
+    if "fandom_wiki" in body:
+        opts["fandom_checked"] = True  # the user decided; don't auto-detect over it
     if "imdb_id" in body:
         db.update_series(sid, imdb_id=(body["imdb_id"] or None))
     db.update_series(sid, options=opts)

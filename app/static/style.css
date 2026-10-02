@@ -114,3 +114,4 @@ form.settings legend { font-weight: 600; padding: 0 6px; }
   td, th { padding: 6px; }
 }
 .field input[type=checkbox] { justify-self: start; width: 18px; height: 18px; }
+.grow-input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }

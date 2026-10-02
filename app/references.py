@@ -59,8 +59,47 @@ def titles_match(a: str, b: str) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.75
 
 
+# ------------------------------------------------------- transcript cleaning
+
+# "Gumball: text", "Mr. Small: text", "Nicole (whispering): text"
+_SPEAKER = re.compile(r"^\s*([A-Z][\w.'’&\- ]{0,40}?)(?:\s*\([^)]{0,40}\))?\s*:\s+(\S.*)$")
+_DIRECTION = re.compile(r"\[[^\]]*\]|\{\{[^}]*\}\}")
+_WIKI = re.compile(r"\[\[(?:[^|\]]*\|)?([^\]]*)\]\]|'{2,}|<[^>]+>")
+
+
+def transcript_stats(text: str) -> tuple[int, int]:
+    """(speaker-labelled lines, substantive lines)."""
+    lines = [l for l in text.splitlines() if len(l.strip()) > 3]
+    return sum(1 for l in lines if _SPEAKER.match(_WIKI.sub(r"\1", l))), len(lines)
+
+
+def clean_transcript(text: str) -> str:
+    """Reduce a wiki/plain-text transcript to spoken dialogue only, so it looks like
+    the subtitles it is compared against. Transcript pages typically label every
+    line with a speaker ("Gumball: ...") and add [stage directions], section
+    headings and an episode navigation box — none of that is in a subtitle, and
+    speaker names in particular make episodes with the same characters look alike."""
+    text = _WIKI.sub(r"\1", text)
+    labelled, total = transcript_stats(text)
+    out = []
+    if total and labelled >= 10 and labelled >= 0.3 * total:
+        # Speaker-labelled transcript: keep only dialogue lines. This also drops
+        # headings, navboxes, categories and free-standing scene descriptions.
+        for line in text.splitlines():
+            m = _SPEAKER.match(line)
+            if m:
+                out.append(m.group(2))
+    else:
+        out = text.splitlines()
+    joined = " ".join(_DIRECTION.sub(" ", l) for l in out)
+    joined = re.sub(r"\([^)]{0,80}\)", " ", joined)
+    return re.sub(r"\s+", " ", joined).strip()
+
+
 def load_refs(tvdb_id: int) -> dict[str, dict]:
-    """code -> {"source", "text", ...}. Manual files override cached downloads."""
+    """code -> {"source", "text", ...}. Manual files override cached downloads.
+    Transcript text (Fandom, manual .txt) is cleaned to dialogue here, at load time,
+    so references cached by older versions benefit without being re-downloaded."""
     out: dict[str, dict] = {}
     d = refs_dir(tvdb_id)
     if d.exists():
@@ -70,6 +109,8 @@ def load_refs(tvdb_id: int) -> dict[str, dict]:
             except json.JSONDecodeError:
                 continue
             if data.get("text"):
+                if data.get("source") == "fandom":
+                    data["text"] = clean_transcript(data["text"])
                 out[f.stem] = data
     md = manual_dir(tvdb_id)
     if md.exists():
@@ -79,7 +120,7 @@ def load_refs(tvdb_id: int) -> dict[str, dict]:
                 continue
             raw = read_text_file(f)
             if f.suffix.lower() == ".txt":
-                text = re.sub(r"\s+", " ", raw)
+                text = clean_transcript(raw)
             else:
                 text = " ".join(c.text for c in parse_subtitle_text(raw, f.suffix.lower()))
             if text.strip():
@@ -278,7 +319,8 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 
 
 def _strip_html(h: str) -> str:
-    h = re.sub(r"(?is)<(script|style|table class=\"navbox).*?</\1>", " ", h)
+    h = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", h)
+    h = re.sub(r"(?is)<(table|div|nav)\b[^>]*class=\"[^\"]*navbox.*?</\1>", " ", h)
     h = re.sub(r"(?i)<br\s*/?>|</p>|</dd>|</li>", "\n", h)
     return re.sub(r"[ \t]+", " ", html.unescape(_HTML_TAG.sub(" ", h))).strip()
 
@@ -317,6 +359,26 @@ def fetch_fandom(wiki: str, page: str) -> str | None:
                         return text
         except httpx.HTTPError:
             pass
+    return None
+
+
+def detect_fandom_wiki(series_name: str, episodes: list[dict], ctx=None) -> str | None:
+    """Guess <slug>.fandom.com from the series name and confirm it really hosts
+    "{title}/Transcript" pages by fetching one for an early episode and checking
+    it reads like a speaker-labelled transcript (so a generic "wiki not found"
+    page can't be mistaken for one)."""
+    name = re.sub(r"\(\d{4}\)|\[[^\]]*\]|\{[^}]*\}", " ", series_name or "").lower()
+    base = re.sub(r"[^a-z0-9]+", "", name)
+    slugs = list(dict.fromkeys(s for s in (base, re.sub(r"^the", "", base)) if len(s) >= 3))
+    probes = [e for e in episodes if e["season"] >= 1 and e.get("title")][:3]
+    for slug in slugs:
+        for ep in probes:
+            try:
+                text = fetch_fandom(slug, f"{ep['title']}/Transcript")
+            except Exception:  # noqa: BLE001
+                text = None
+            if text and transcript_stats(text)[0] >= 15:
+                return slug
     return None
 
 

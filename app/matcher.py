@@ -102,14 +102,20 @@ class Matcher:
             best = alts[0]
             second = alts[1] if len(alts) > 1 else {"code": None, "score": 0.0}
             margin = best["score"] - second["score"]
-            high = (best["score"] >= self.s["min_score"] and margin >= self.s["min_margin"]
-                    and best["score"] >= 1.4 * max(second["score"], 1e-6))
+            why = []
+            if best["score"] < self.s["min_score"]:
+                why.append(f"weak match ({best['score']:.2f} < {self.s['min_score']:.2f})")
+            if margin < self.s["min_margin"] or best["score"] < 1.4 * max(second["score"], 1e-6):
+                why.append(f"close to {second['code']} ({best['score']:.2f} vs "
+                           f"{second['score']:.2f})")
+            high = not why
             segments.append({
                 "start": round(r["start"], 1), "end": round(r["end"], 1),
                 "code": best["code"], "score": best["score"],
                 "margin": round(margin, 4), "confidence": "high" if high else "low",
                 "alternatives": alts[1:],
                 "words": len(seg_text.split()),
+                "why": "; ".join(why),
             })
         # Collapse adjacent segments that re-scored to the same episode.
         out: list[dict] = []
