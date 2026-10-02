@@ -428,12 +428,14 @@ def ref_meta(tvdb_id: int) -> dict[str, dict]:
 
 
 def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
-                       retry_misses: bool = False) -> dict:
+                       retry_misses: bool = False, retry_codes: list[str] | None = None) -> dict:
     tvdb_id = series["tvdb_id"]
     episodes = series["episodes"]
     opts = series.get("options") or {}
     have = load_refs(tvdb_id)
     misses = {} if retry_misses else _load_misses(tvdb_id)
+    for code in retry_codes or []:
+        misses.pop(code, None)
     for code in force_codes or []:
         clear_reference(tvdb_id, code)
         have.pop(code, None)
@@ -442,6 +444,7 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
     wiki = (opts.get("fandom_wiki") or "").strip()
     pattern = opts.get("fandom_page_pattern") or "{title}/Transcript"
     overrides = opts.get("fandom_title_overrides") or {}
+    page_map = opts.get("fandom_page_map") or {}
 
     wanted = [e for e in episodes if not (e["season"] == 0 and not opts.get("include_specials"))]
     todo = [e for e in wanted if ep_code(e["season"], e["episode"]) not in have
@@ -477,9 +480,8 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
             ref, note, fandom_status = None, "", None
             # Fandom first when configured: it costs no download quota.
             if wiki:
-                page = overrides.get(code) or pattern.format(title=ep["title"],
-                                                             season=ep["season"],
-                                                             episode=ep["episode"])
+                page = overrides.get(code) or page_map.get(code) or pattern.format(
+                    title=ep["title"], season=ep["season"], episode=ep["episode"])
                 text, fandom_status = fandom_page(wiki, page)
                 if text:
                     ref, note = {"source": "fandom", "text": text, "page": page}, f"fandom {page}"

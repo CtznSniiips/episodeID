@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import db, llm, titlecard, tvdb
+from . import db, fandom, llm, titlecard, tvdb
 from .config import get_settings
 from .executor import apply_plan, sonarr_rescan, undo_apply
 from .jobs import handler
@@ -43,26 +43,73 @@ def job_refresh_episodes(ctx, params):
     return {"episodes": len(series["episodes"])}
 
 
+def _find_wiki(series: dict, ctx, force: bool = False) -> dict:
+    """Discover the series' Fandom wiki and/or map its transcript pages to episodes.
+    Runs when no wiki is known yet, or when a wiki was typed in but its pages
+    haven't been mapped. Returns the updated series."""
+    opts = dict(series.get("options") or {})
+    regular = sum(1 for e in series["episodes"] if e["season"] >= 1)
+    wiki = (opts.get("fandom_wiki") or "").strip()
+    if wiki and not force:
+        if opts.get("fandom_page_map") is not None:
+            return series
+        ctx.status(f"Listing transcript pages on {wiki}")
+        with fandom._client() as c:
+            pages, how = fandom.list_transcript_pages(c, wiki)
+        mapping = fandom.map_pages([e for e in series["episodes"] if e["season"] >= 1], pages)
+        opts["fandom_page_map"] = mapping
+        opts["fandom_discovery"] = {"wiki": wiki, "mapped": len(mapping), "total": regular,
+                                    "found_via": how, "auto": False, "at": db.now()}
+        ctx.log(f"{wiki}: {len(pages)} transcript pages ({how}); {len(mapping)} of {regular} "
+                "episodes matched to a page by title.")
+    elif force or not opts.get("fandom_checked"):
+        ctx.status("Looking for a Fandom transcript wiki")
+        ctx.log(f"Looking for a Fandom wiki for '{series['name']}'…")
+        found = fandom.discover(series["name"], series["episodes"], ctx)
+        opts["fandom_checked"] = True
+        if found:
+            opts["fandom_wiki"] = found["wiki"]
+            opts["fandom_page_map"] = found["page_map"]
+            if found.get("pattern") and not opts.get("fandom_page_pattern"):
+                opts["fandom_page_pattern"] = found["pattern"]
+            opts["fandom_discovery"] = {"wiki": found["wiki"], "sitename": found["sitename"],
+                                        "mapped": found["mapped"], "total": regular,
+                                        "found_via": found["found_via"], "auto": True,
+                                        "at": db.now()}
+            ctx.log(f"Found {found['wiki']}.fandom.com ({found['sitename']}): {found['mapped']} of "
+                    f"{regular} episodes have a transcript page — using them before OpenSubtitles.")
+        else:
+            # Wikis without a transcript category or searchable titles: try the classic layout.
+            slug = detect_fandom_wiki(series["name"], series["episodes"], ctx)
+            if slug:
+                opts["fandom_wiki"] = slug
+                opts["fandom_page_map"] = {}
+                opts["fandom_discovery"] = {"wiki": slug, "mapped": 0, "total": regular,
+                                            "found_via": "{title}/Transcript pages", "auto": True,
+                                            "at": db.now()}
+                ctx.log(f"Found transcripts on {slug}.fandom.com ({{title}}/Transcript pages).")
+            else:
+                opts["fandom_discovery"] = {"wiki": None, "at": db.now()}
+                ctx.log("No Fandom transcript wiki found for this series.")
+    else:
+        return series
+    db.update_series(series["id"], options=opts)
+    return db.get_series(series["id"])
+
+
 @handler("fetch_refs")
 def job_fetch_refs(ctx, params):
     series = _ensure_episodes(_series(ctx), ctx)
-    opts = dict(series.get("options") or {})
-    if not opts.get("fandom_wiki") and not opts.get("fandom_checked"):
-        # Free transcripts first: look for a Fandom wiki before touching OpenSubtitles quota.
-        ctx.status("Looking for a Fandom transcript wiki")
-        slug = detect_fandom_wiki(series["name"], series["episodes"], ctx)
-        opts["fandom_checked"] = True
-        if slug:
-            opts["fandom_wiki"] = slug
-            ctx.log(f"Found transcripts on {slug}.fandom.com — using them before OpenSubtitles. "
-                    "(Change this under Series options.)")
-        else:
-            ctx.log("No Fandom transcript wiki found for this series.")
-        db.update_series(series["id"], options=opts)
-        series = db.get_series(series["id"])
+    before = dict((series.get("options") or {}).get("fandom_page_map") or {})
+    series = _find_wiki(series, ctx, force=bool(params.get("find_wiki")))
+    after = (series.get("options") or {}).get("fandom_page_map") or {}
+    # Episodes that just gained a transcript page deserve another try even if they were
+    # recorded as "not found" earlier.
+    retry = [c for c in after if before.get(c) != after[c]]
     ctx.status("Fetching references")
     result = refresh_references(series, ctx, force_codes=params.get("codes"),
-                                retry_misses=bool(params.get("retry_misses")))
+                                retry_misses=bool(params.get("retry_misses")),
+                                retry_codes=retry)
     db.update_series(series["id"], episodes=series["episodes"])  # cached IMDb ids
     return result
 

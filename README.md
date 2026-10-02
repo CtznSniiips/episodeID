@@ -7,7 +7,10 @@ Works out which episode each video file **really** contains by reading its dialo
 1. **Episode list** comes from TVDB (default/aired order, the same order Sonarr uses).
 2. **References** are what each episode is supposed to say, fetched once and cached:
    - files you upload yourself (*Episodes & references* tab), highest priority
-   - a Fandom wiki transcript page, if you set one for the series (no quota cost)
+   - a Fandom wiki transcript page (no quota cost). The wiki is found automatically from
+     the series name, its transcript pages are listed from the wiki itself and matched to
+     TVDB episodes by title (so "The Re-Run" finds "The Rerun/Transcript"). You can still
+     set or override it under *Series options*.
    - OpenSubtitles, looked up by the episode's IMDb ID from TVDB. If only the series ID is available it searches by season/episode and checks the title, then falls back to searching by title, so differing numbering schemes don't silently give you the wrong reference.
 3. **Your files' dialogue** comes from a sidecar `.srt/.ass/.vtt`, else an embedded text subtitle track, else **Whisper** (faster-whisper; also covers image-based PGS/VobSub subs). Results are cached, and survive renames.
 4. **Matching**: the dialogue is cut into 90 s windows (every 45 s), each scored against every reference with TF-IDF cosine similarity. A Viterbi pass picks one episode per window with a switching penalty, giving clean segments, so two-episode files and swapped halves are detected. Each segment is re-scored as a whole for its confidence.

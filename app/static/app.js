@@ -547,9 +547,11 @@ async function tabOptions() {
       <select name="title_cards_scope">${[["unconfirmed", "Only files the dialogue match didn't confirm"], ["all", "Every file (slower)"]].map(([v, t]) =>
         `<option value="${v}" ${(o.title_cards_scope || "unconfirmed") === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>
     </fieldset>
-    <fieldset><legend>Fandom wiki transcripts (optional)</legend>
-    ${field("fandom_wiki", "Wiki", o.fandom_wiki || "", "Subdomain or host, e.g. theamazingworldofgumball — checked before OpenSubtitles and costs no download quota.")}
-    ${field("fandom_page_pattern", "Transcript page", o.fandom_page_pattern || "{title}/Transcript", "Use {title}, {season}, {episode}.")}
+    <fieldset><legend>Fandom wiki transcripts</legend>
+    <div class="row" style="margin-bottom:6px"><div class="small" style="flex:1">${wikiStatus(o)}</div>
+      <button class="btn small" type="button" id="find-wiki">Find automatically</button></div>
+    ${field("fandom_wiki", "Wiki", o.fandom_wiki || "", "Found automatically when the series is added. Subdomain or host, e.g. theamazingworldofgumball. Checked before OpenSubtitles; costs no download quota.")}
+    ${field("fandom_page_pattern", "Transcript page", o.fandom_page_pattern || "{title}/Transcript", "Only used for episodes not matched to a page automatically. Use {title}, {season}, {episode}.")}
     <div class="field"><label>Page title overrides</label>
       <textarea name="fandom_title_overrides" rows="4" class="mono" placeholder='{"S01E01": "The DVD/Transcript"}'>${esc(o.fandom_title_overrides ? JSON.stringify(o.fandom_title_overrides, null, 1) : "")}</textarea>
       <div class="hint">JSON object: episode code → exact wiki page title.</div></div>
@@ -571,11 +573,24 @@ async function tabOptions() {
       toast("Saved");
     } catch (err) { fail(err); }
   };
+  $("#find-wiki").onclick = () => { startJob("fetch_refs", { find_wiki: true }); toast("Looking for the wiki — see the job log."); };
   $("#del").onclick = async () => {
     if (!confirm("Remove this series from EpisodeID? No media files are touched.")) return;
     await api(`/api/series/${s.id}`, { method: "DELETE" });
     location.hash = "#/";
   };
+}
+
+function wikiStatus(o) {
+  const d = o.fandom_discovery;
+  if (!d) return o.fandom_wiki ? "Transcript pages will be matched to episodes on the next reference fetch."
+    : `<span class="muted">Not searched yet — happens on the next reference fetch.</span>`;
+  if (!d.wiki) return `<span class="muted">No Fandom wiki with transcripts was found for this series.</span>`;
+  const host = d.wiki.includes(".") ? d.wiki : `${d.wiki}.fandom.com`;
+  return `<span class="badge b-ok">${d.auto ? "found" : "set"}</span> <a href="https://${esc(host)}" target="_blank">${esc(host)}</a>` +
+    (d.sitename ? ` <span class="muted">(${esc(d.sitename)})</span>` : "") +
+    (d.total ? ` — ${d.mapped} of ${d.total} episodes matched to a transcript page` : "") +
+    (d.found_via ? ` <span class="muted">via ${esc(d.found_via)}</span>` : "");
 }
 
 function tcStatus(o) {

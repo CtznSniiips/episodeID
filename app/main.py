@@ -298,6 +298,9 @@ def series_options(sid: int, body: dict):
             opts[k] = body[k]
     if "fandom_wiki" in body:
         opts["fandom_checked"] = True  # the user decided; don't auto-detect over it
+        if (body["fandom_wiki"] or "").strip() != ((s["options"] or {}).get("fandom_wiki") or ""):
+            opts.pop("fandom_page_map", None)      # new wiki: its pages get mapped on next fetch
+            opts.pop("fandom_discovery", None)
     if body.get("title_cards") == "auto" and (s["options"] or {}).get("title_cards") not in (None, "auto"):
         opts.pop("title_cards_status", None)  # switching back to auto: test again
     if "imdb_id" in body:
