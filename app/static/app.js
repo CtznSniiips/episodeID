@@ -312,7 +312,12 @@ function segHtml(sg, eps) {
   const cls = conf === "high" ? "b-ok" : conf === "manual" ? "b-info" : "b-warn";
   let h = `<span class="seg"><span class="badge ${cls}" title="score ${sg.score} · margin ${sg.margin ?? ""}">${
     esc(sg.code || "?")}</span> <span class="muted small">${fmtTime(sg.start)}–${fmtTime(sg.end)}</span>`;
-  if (sg.code && eps[sg.code]) h += ` <span class="small">${esc(eps[sg.code].title)}</span>`;
+  if (sg.code && eps[sg.code]) {
+    const e = eps[sg.code];
+    const shaky = (e.ref_note || "").includes("⚠");
+    h += ` <span class="small">${esc(e.title)}</span>` + (e.ref ?
+      ` <span class="small ${shaky ? "" : "muted"}" style="${shaky ? "color:var(--warn)" : ""}" title="${esc(e.ref_note || "")}">· ref: ${esc(e.ref.split(":")[0])}${shaky ? " ⚠" : ""}</span>` : "");
+  }
   if (sg.confidence !== "high" && sg.why)
     h += `<div class="small" style="color:var(--warn)">${esc(sg.why)}</div>`;
   else if (sg.confidence !== "high" && sg.alternatives && sg.alternatives.length)
@@ -396,6 +401,7 @@ function rowHtml(it, eps, applied) {
     <td><span class="badge ${KIND_BADGE[it.kind]}">${esc(it.kind)}</span>
       <span class="badge ${STATUS_BADGE[it.status] || ""}">${esc(it.status)}</span>
       ${it.ai ? '<span class="badge b-ai">AI</span>' : ""}
+      ${it.ref_warning ? '<span class="badge b-warn">check reference</span>' : ""}
       <div class="path" style="margin-top:4px">${esc(it.source)}</div>${targets}
       <div class="muted small">${esc(it.reason || "")}</div></td>
     <td>${segs}${src}</td>

@@ -249,8 +249,9 @@ def _ref_note(ref: dict | None) -> str:
         return ""
     if ref.get("source") == "opensubtitles":
         n = f"via {ref.get('via')}"
-        if not ref.get("title_verified", True):
-            n += f" — title unverified ('{ref.get('os_title')}')"
+        if ref.get("numbering_conflict", not ref.get("title_verified", True)):
+            n += (f" — ⚠ OpenSubtitles has this as {ref.get('os_number')} "
+                  f"'{ref.get('os_title')}'; may be another episode's dialogue")
         return n
     if ref.get("source") == "fandom":
         return ref.get("page", "")

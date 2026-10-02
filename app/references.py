@@ -264,39 +264,43 @@ def _pick(results: list[dict], want_title: str | None, season: int, episode: int
 
 
 def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dict | None, str]:
-    """Returns (ref, note). Raises QuotaExhausted."""
+    """Returns (ref, note). Raises QuotaExhausted.
+
+    Subtitle *text* on OpenSubtitles comes from release files, which are numbered the
+    way Sonarr/TVDB number them; the *metadata* (title, IMDb id) comes from IMDb. For
+    shows where IMDb orders episodes differently (Gumball's paired episodes, for
+    one), looking a subtitle up by IMDb id or by title returns the neighbouring
+    episode's dialogue. So: search by TVDB season/episode first, and flag any
+    reference where IMDb's numbering disagrees so the planner treats it with care."""
+    code = ep_code(ep["season"], ep["episode"])
     title = ep["title"]
-    imdb_ep = ep.get("imdb_id")
-    if imdb_ep is None and ep.get("tvdb_episode_id"):
-        try:
-            imdb_ep = tvdb.episode_imdb_id(ep["tvdb_episode_id"]) or ""
-        except Exception:  # noqa: BLE001
-            imdb_ep = ""
-        ep["imdb_id"] = imdb_ep
-    pick = None
-    how = ""
-    if imdb_ep:
-        res = os_.search(imdb_id=imdb_ep.lstrip("t"))
-        p = _pick(res, title, ep["season"], ep["episode"], check_numbers=False)
-        if p:
-            pick, how = p, "episode imdb"
-    if pick is None and series.get("imdb_id"):
+    pick, how = None, ""
+    if series.get("imdb_id"):
         res = os_.search(parent_imdb_id=series["imdb_id"].lstrip("t"),
                          season_number=ep["season"], episode_number=ep["episode"])
         p = _pick(res, title, ep["season"], ep["episode"], check_numbers=True)
-        if p and p[0]:
-            pick, how = p, "series imdb + number"
-        else:
-            # Numbering may differ from TVDB; look the episode up by title instead.
-            res = os_.search(parent_imdb_id=series["imdb_id"].lstrip("t"), query=title)
+        if p:
+            pick, how = p, "series + episode number"
+    if pick is None:
+        imdb_ep = ep.get("imdb_id")
+        if imdb_ep is None and ep.get("tvdb_episode_id"):
+            try:
+                imdb_ep = tvdb.episode_imdb_id(ep["tvdb_episode_id"]) or ""
+            except Exception:  # noqa: BLE001
+                imdb_ep = ""
+            ep["imdb_id"] = imdb_ep
+        if imdb_ep:
+            res = os_.search(imdb_id=imdb_ep.lstrip("t"))
             p = _pick(res, title, ep["season"], ep["episode"], check_numbers=False)
-            if p and p[0]:
-                pick, how = p, "series imdb + title"
+            if p:
+                pick, how = p, "episode IMDb id"
     if pick is None:
         return None, "no subtitle found"
     title_ok, _, _, r = pick
     a = r["attributes"]
     fd = a.get("feature_details") or {}
+    os_number = f"S{fd.get('season_number') or 0:02d}E{fd.get('episode_number') or 0:02d}"
+    conflict = bool(fd.get("episode_number")) and os_number != code or not title_ok
     raw = os_.download(a["files"][0]["file_id"])
     cues = parse_subtitle_text(raw, ".srt")
     text = " ".join(c.text for c in cues)
@@ -307,8 +311,9 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
         "text": text,
         "via": how,
         "os_title": fd.get("title"),
-        "os_number": f"S{fd.get('season_number') or 0:02d}E{fd.get('episode_number') or 0:02d}",
+        "os_number": os_number,
         "title_verified": bool(title_ok),
+        "numbering_conflict": conflict,
         "subtitle_id": r.get("id"),
     }, how
 
@@ -325,41 +330,61 @@ def _strip_html(h: str) -> str:
     return re.sub(r"[ \t]+", " ", html.unescape(_HTML_TAG.sub(" ", h))).strip()
 
 
-def fetch_fandom(wiki: str, page: str) -> str | None:
+def fandom_page(wiki: str, page: str) -> tuple[str | None, str]:
+    """Fetch a wiki page. Returns (text, status) where status is
+    "ok", "missing" (the wiki says the page doesn't exist) or "error" (blocked,
+    rate-limited or unreachable — worth retrying later, NOT evidence it's missing)."""
     wiki = wiki.strip()
     host = wiki if "." in wiki else f"{wiki}.fandom.com"
     host = re.sub(r"^https?://", "", host).rstrip("/")
     api = f"https://{host}/api.php"
-    headers = {"User-Agent": BROWSER_UA}
-    with httpx.Client(timeout=30, headers=headers, follow_redirects=True) as c:
-        try:
-            r = c.get(api, params={"action": "parse", "page": page, "prop": "text",
-                                   "format": "json", "redirects": 1})
-            if r.status_code == 200 and "parse" in r.json():
-                text = _strip_html(r.json()["parse"]["text"]["*"])
+    missing = False
+    with httpx.Client(timeout=30, headers={"User-Agent": BROWSER_UA},
+                      follow_redirects=True) as c:
+        def get(url, params=None):
+            for attempt in range(3):
+                try:
+                    r = c.get(url, params=params)
+                except httpx.HTTPError:
+                    r = None
+                if r is not None and r.status_code not in (402, 403, 429) and r.status_code < 500:
+                    return r
+                time.sleep(2 + attempt * 4)  # throttled or flaky: back off and retry
+            return r
+
+        r = get(api, {"action": "parse", "page": page, "prop": "text", "format": "json",
+                      "redirects": 1})
+        if r is not None and r.status_code == 200:
+            try:
+                j = r.json()
+            except ValueError:
+                j = {}
+            if "parse" in j:
+                text = _strip_html(j["parse"]["text"]["*"])
                 if len(text) > 500:
-                    return text
-        except (httpx.HTTPError, ValueError):
-            pass
-        try:
-            r = c.get(f"https://{host}/index.php", params={"title": page, "action": "raw"})
-            if r.status_code == 200 and len(r.text) > 500:
-                t = re.sub(r"\{\{[^}]*\}\}|\[\[(?:[^|\]]*\|)?([^\]]*)\]\]", r"\1", r.text)
-                return re.sub(r"'{2,}|<[^>]+>", "", t)
-        except httpx.HTTPError:
-            pass
-        try:
-            r = c.get(f"https://{host}/wiki/{page.replace(' ', '_')}")
-            if r.status_code == 200:
-                m = re.search(r'(?s)<div class="mw-parser-output">(.*?)<div class="printfooter',
-                              r.text)
-                if m:
-                    text = _strip_html(m.group(1))
-                    if len(text) > 500:
-                        return text
-        except httpx.HTTPError:
-            pass
-    return None
+                    return text, "ok"
+            elif (j.get("error") or {}).get("code") in ("missingtitle", "invalidtitle"):
+                missing = True
+        r = get(f"https://{host}/index.php", {"title": page, "action": "raw"})
+        if r is not None and r.status_code == 200 and len(r.text) > 500:
+            t = re.sub(r"\{\{[^}]*\}\}|\[\[(?:[^|\]]*\|)?([^\]]*)\]\]", r"\1", r.text)
+            return re.sub(r"'{2,}|<[^>]+>", "", t), "ok"
+        if r is not None and r.status_code == 404:
+            missing = True
+        r = get(f"https://{host}/wiki/{page.replace(' ', '_')}")
+        if r is not None and r.status_code == 200:
+            m = re.search(r'(?s)<div class="mw-parser-output">(.*?)<div class="printfooter', r.text)
+            if m:
+                text = _strip_html(m.group(1))
+                if len(text) > 500:
+                    return text, "ok"
+        elif r is not None and r.status_code == 404:
+            missing = True
+    return None, "missing" if missing else "error"
+
+
+def fetch_fandom(wiki: str, page: str) -> str | None:
+    return fandom_page(wiki, page)[0]
 
 
 def detect_fandom_wiki(series_name: str, episodes: list[dict], ctx=None) -> str | None:
@@ -384,6 +409,24 @@ def detect_fandom_wiki(series_name: str, episodes: list[dict], ctx=None) -> str 
 
 # ------------------------------------------------------------------ driver
 
+def _read_cached(tvdb_id: int, code: str) -> dict | None:
+    try:
+        return json.loads((refs_dir(tvdb_id) / f"{code}.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def ref_meta(tvdb_id: int) -> dict[str, dict]:
+    """code -> where its reference came from and how far it can be trusted."""
+    out = {}
+    for code, r in load_refs(tvdb_id).items():
+        low = r.get("source") == "opensubtitles" and bool(
+            r.get("numbering_conflict", not r.get("title_verified", True)))
+        out[code] = {"source": r.get("source", "").split(":")[0], "low_trust": low,
+                     "os_number": r.get("os_number"), "os_title": r.get("os_title")}
+    return out
+
+
 def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                        retry_misses: bool = False) -> dict:
     tvdb_id = series["tvdb_id"]
@@ -396,42 +439,74 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
         have.pop(code, None)
         misses.pop(code, None)
 
-    todo = [e for e in episodes if ep_code(e["season"], e["episode"]) not in have
-            and ep_code(e["season"], e["episode"]) not in misses
-            and not (e["season"] == 0 and not opts.get("include_specials"))]
-    ctx.log(f"{len(have)} episodes already have references; {len(todo)} to fetch.")
-    if not todo:
-        return {"fetched": 0, "missing": len(misses)}
-
     wiki = (opts.get("fandom_wiki") or "").strip()
     pattern = opts.get("fandom_page_pattern") or "{title}/Transcript"
     overrides = opts.get("fandom_title_overrides") or {}
+
+    wanted = [e for e in episodes if not (e["season"] == 0 and not opts.get("include_specials"))]
+    todo = [e for e in wanted if ep_code(e["season"], e["episode"]) not in have
+            and ep_code(e["season"], e["episode"]) not in misses]
+    # With a wiki configured, replace OpenSubtitles references with transcripts:
+    # those are looked up by title, so they can't be numbered differently.
+    upgrades = [e for e in wanted if wiki
+                and (have.get(ep_code(e["season"], e["episode"])) or {}).get("source") == "opensubtitles"
+                and not have[ep_code(e["season"], e["episode"])].get("fandom_tried")]
+    ctx.log(f"{len(have)} episodes already have references; {len(todo)} to fetch"
+            + (f"; {len(upgrades)} OpenSubtitles references to replace with wiki transcripts"
+               if upgrades else "") + ".")
+    if not todo and not upgrades:
+        return {"fetched": 0, "missing": len(misses)}
+
     os_ = OpenSubtitles()
-    fetched = 0
+    fetched = upgraded = deferred = 0
     quota_hit = None
+    work = [(e, False) for e in todo] + [(e, True) for e in upgrades]
     try:
-        if os_.configured:
+        if os_.configured and todo:
             os_.login()
             if os_.remaining is not None:
                 ctx.log(f"OpenSubtitles: {os_.remaining} downloads remaining today.")
-        elif not wiki:
+        elif not os_.configured and not wiki:
             ctx.log("No OpenSubtitles API key and no Fandom wiki set — nothing to fetch from.")
             return {"fetched": 0, "missing": len(todo)}
 
-        for i, ep in enumerate(todo):
+        for i, (ep, is_upgrade) in enumerate(work):
             ctx.check_cancel()
             code = ep_code(ep["season"], ep["episode"])
-            ctx.progress(i / len(todo), f"References: {code} {ep['title']}")
-            ref, note = None, ""
-            os_skipped = os_.configured and quota_hit is not None
+            ctx.progress(i / len(work), f"References: {code} {ep['title']}")
+            ref, note, fandom_status = None, "", None
             # Fandom first when configured: it costs no download quota.
             if wiki:
                 page = overrides.get(code) or pattern.format(title=ep["title"],
                                                              season=ep["season"],
                                                              episode=ep["episode"])
-                text = fetch_fandom(wiki, page)
+                text, fandom_status = fandom_page(wiki, page)
                 if text:
                     ref, note = {"source": "fandom", "text": text, "page": page}, f"fandom {page}"
+                elif fandom_status == "error":
+                    note = f"wiki unreachable for {page} — will retry next fetch"
+
+            if is_upgrade:
+                if ref:
+                    _save(tvdb_id, code, ref)
+                    upgraded += 1
+                    ctx.log(f"{code} ↑ replaced OpenSubtitles reference with {note}")
+                elif fandom_status == "error":
+                    deferred += 1
+                    ctx.log(f"{code} … {note}; keeping the OpenSubtitles reference for now")
+                elif fandom_status == "missing":
+                    cur = _read_cached(tvdb_id, code)
+                    if cur:
+                        cur["fandom_tried"] = True
+                        _save(tvdb_id, code, cur)
+                continue
+
+            if ref is None and fandom_status == "error":
+                # Don't fall back to OpenSubtitles just because the wiki hiccuped.
+                deferred += 1
+                ctx.log(f"{code} … {note}")
+                continue
+            os_skipped = os_.configured and quota_hit is not None
             if ref is None and os_.configured and quota_hit is None:
                 try:
                     ref, note = fetch_opensubs(os_, series, ep, ctx)
@@ -444,10 +519,15 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                 except Exception as e:  # noqa: BLE001
                     note = f"error: {e}"
             if ref:
+                if ref.get("source") == "opensubtitles" and fandom_status == "missing":
+                    ref["fandom_tried"] = True
                 _save(tvdb_id, code, ref)
                 fetched += 1
-                warn = "" if ref.get("title_verified", True) else \
-                    f"  ⚠ title not verified (OpenSubtitles says '{ref.get('os_title')}')"
+                warn = ""
+                if ref.get("numbering_conflict"):
+                    warn = (f"  ⚠ OpenSubtitles/IMDb calls this {ref.get('os_number')} "
+                            f"'{ref.get('os_title')}' — numbering differs from TVDB, "
+                            "renames relying on it won't be pre-ticked")
                 ctx.log(f"{code} ✓ {note}{warn}")
             elif not os_skipped and not note.startswith("error"):
                 # Remember real misses so re-runs don't burn quota on them.
@@ -458,5 +538,9 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
         _save_misses(tvdb_id, misses)
     finally:
         os_.close()
-    return {"fetched": fetched, "missing": len(misses), "quota_hit": quota_hit,
+    if deferred:
+        ctx.log(f"{deferred} episodes skipped because the wiki didn't respond; "
+                "run Fetch references again later.")
+    return {"fetched": fetched, "upgraded": upgraded, "deferred": deferred,
+            "missing": len(misses), "quota_hit": quota_hit,
             "remaining_downloads": os_.remaining}

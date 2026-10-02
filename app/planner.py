@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import get_settings
 from .media_text import SUB_EXTS, VIDEO_EXTS
+from .references import ref_meta
 
 META_EXTS = {".nfo", ".jpg", ".jpeg", ".png", ".tbn", ".xml"}
 QUALITY_RE = re.compile(
@@ -320,6 +321,25 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
                           targets=[{"path": f"{backup}/unverified/{occ}"}],
                           selected=True)
                 moving.add(occ)
+
+    # 4. Distrust changes that rest on a reference whose numbering is disputed
+    #    (OpenSubtitles/IMDb number the episode differently from TVDB). Those can
+    #    hold the neighbouring episode's dialogue, which looks exactly like two
+    #    correctly named files that need swapping.
+    meta = ref_meta(series["tvdb_id"])
+    for it in items:
+        if it["kind"] not in ("rename", "split", "aside"):
+            continue
+        involved = set(it.get("codes") or []) | set(it.get("expected") or [])
+        shaky = sorted(c for c in involved if (meta.get(c) or {}).get("low_trust"))
+        if shaky and not any(sg.get("override") for sg in it.get("segments") or []):
+            details = ", ".join(
+                f"{c} (OpenSubtitles has it as {meta[c].get('os_number')} "
+                f"'{meta[c].get('os_title')}')" for c in shaky)
+            it["selected"] = False
+            it["ref_warning"] = True
+            it["reason"] = (f"Check first — reference numbering disputed for {details}. "
+                            "Upload or re-fetch that reference if this looks wrong.")
 
     for i, it in enumerate(items):
         it["id"] = i
