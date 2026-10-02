@@ -22,7 +22,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .top { display: flex; align-items: center; gap: 24px; padding: 10px 20px;
   background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; color: var(--text); }
-.brand img { width: 26px; height: 26px; }
+.brand img { width: 32px; height: 32px; }
 nav { display: flex; gap: 4px; }
 nav a { padding: 6px 12px; border-radius: 6px; color: var(--muted); }
 nav a.active { background: var(--panel-2); color: var(--text); font-weight: 600; }

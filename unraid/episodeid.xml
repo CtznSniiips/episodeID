@@ -11,7 +11,7 @@
   <Overview>Identifies which episode each video file really contains by matching its dialogue (subtitles, or a Whisper transcript) against reference subtitles, then renames/splits files to TVDB numbering so they line up with Sonarr. Every change can be undone; nothing is deleted.</Overview>
   <Category>MediaApp:Video Tools:</Category>
   <WebUI>http://[IP]:[PORT:8686]/</WebUI>
-  <Icon>https://raw.githubusercontent.com/CtznSniiips/EpisodeID/main/app/static/icon.svg</Icon>
+  <Icon>https://raw.githubusercontent.com/CtznSniiips/EpisodeID/main/app/static/icon.png</Icon>
   <ExtraParams/>
   <Config Name="WebUI Port" Target="8686" Default="8686" Mode="tcp" Description="Web interface" Type="Port" Display="always" Required="true" Mask="false">8686</Config>
   <Config Name="TV library" Target="/media/tv" Default="/mnt/user/tv" Mode="rw" Description="Your TV folder (read-write)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/tv</Config>

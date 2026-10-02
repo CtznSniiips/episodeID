@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="120 120 1060 1060" width="1060" height="1060">
-  <title>EpisodeID</title><style>.o{fill:#0D2039}.os{stroke:#0D2039}@media (prefers-color-scheme: dark){.o{fill:#DCE6F3}.os{stroke:#DCE6F3}}</style>
+  <title>EpisodeID</title>
   <defs>
     <linearGradient id="screen" x1="240" y1="417" x2="958" y2="877" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#5CC6F6"/><stop offset=".45" stop-color="#2E9BF6"/><stop offset="1" stop-color="#0D68F2"/>
@@ -18,16 +18,16 @@
     </filter>
   </defs>
   <g mask="url(#lens-cut)">
-    <g class="os" stroke-width="60" stroke-linecap="round" fill="none">
+    <g class="os" stroke="#0D2039" stroke-width="60" stroke-linecap="round" fill="none">
       <line x1="410" y1="190" x2="627" y2="390"/><line x1="844" y1="190" x2="627" y2="390"/>
     </g>
-    <rect class="o" x="170" y="349" width="855" height="590" rx="112"/>
+    <rect class="o" fill="#0D2039" x="170" y="349" width="855" height="590" rx="112"/>
     <rect x="240" y="417" width="718" height="460" rx="48" fill="url(#screen)"/>
     <path clip-path="url(#scr)" d="M240 790 C 420 760, 700 640, 958 452 L 958 465 L 958 417 L 240 417 Z" fill="#fff" opacity=".10"/>
     <path d="M501 528 L501 752 L676 640 Z" fill="#EEF1F3" stroke="#EEF1F3" stroke-width="30" stroke-linejoin="round"/>
   </g>
-  <circle class="os" cx="854" cy="824" r="195.5" fill="none" stroke-width="49"/>
-  <line class="os" x1="998" y1="980" x2="1112" y2="1104" stroke-width="62" stroke-linecap="round"/>
+  <circle class="os" stroke="#0D2039" cx="854" cy="824" r="195.5" fill="none" stroke-width="49"/>
+  <line class="os" stroke="#0D2039" x1="998" y1="980" x2="1112" y2="1104" stroke-width="62" stroke-linecap="round"/>
   <rect x="748" y="730" width="178" height="54" rx="27" fill="#1CCA94"/>
   <rect x="748" y="803" width="230" height="54" rx="27" fill="url(#bar)"/>
   <rect x="748" y="877" width="178" height="54" rx="27" fill="#5B3ABF"/>

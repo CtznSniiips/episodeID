@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="app/static/icon-dark.svg">
+    <img src="app/static/icon-light.svg" alt="EpisodeID" width="128">
+  </picture>
+</p>
+
 # EpisodeID
 
 Works out which episode each video file **really** contains by reading its dialogue, then renames (and if needed splits) files to TVDB numbering so they line up with Sonarr. It works with any series and runs as a Docker container with a web UI.
