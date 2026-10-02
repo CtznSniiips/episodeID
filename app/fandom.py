@@ -139,7 +139,8 @@ def slug_candidates(series_name: str) -> list[str]:
 
 
 def wiki_host(wiki: str) -> str:
-    wiki = re.sub(r"^https?://", "", wiki.strip()).rstrip("/")
+    from .references import normalize_wiki
+    wiki = normalize_wiki(wiki)
     return wiki if "." in wiki else f"{wiki}.fandom.com"
 
 

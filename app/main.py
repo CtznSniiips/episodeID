@@ -348,6 +348,12 @@ def series_options(sid: int, body: dict):
         if k in body:
             opts[k] = body[k]
     if "fandom_wiki" in body:
+        from .references import normalize_page, normalize_wiki
+        opts["fandom_wiki"] = normalize_wiki(body["fandom_wiki"] or "")
+        body["fandom_wiki"] = opts["fandom_wiki"]
+        if isinstance(opts.get("fandom_title_overrides"), dict):
+            opts["fandom_title_overrides"] = {k.strip().upper(): normalize_page(v)
+                                              for k, v in opts["fandom_title_overrides"].items() if v}
         opts["fandom_checked"] = True  # the user decided; don't auto-detect over it
         if (body["fandom_wiki"] or "").strip() != ((s["options"] or {}).get("fandom_wiki") or ""):
             opts.pop("fandom_page_map", None)      # new wiki: its pages get mapped on next fetch

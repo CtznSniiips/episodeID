@@ -189,6 +189,14 @@ class QuotaExhausted(Exception):
     pass
 
 
+class OpenSubtitlesAuthError(RuntimeError):
+    """The API key or account was rejected — no point trying further episodes."""
+
+
+def _invalid_domain(r: httpx.Response) -> bool:
+    return r.status_code == 401 and "invalid domain" in r.text.lower()
+
+
 class OpenSubtitles:
     def __init__(self):
         s = get_settings()
@@ -197,7 +205,11 @@ class OpenSubtitles:
         self.password = s["opensubtitles_password"]
         self.lang = s["subtitle_language"] or "en"
         self.token = None
+        # Searches always go to the main API. The server returned at login (vip-api… for
+        # VIP accounts) is used for downloads only: it answers searches with
+        # 401 "Invalid domain".
         self.base = OS_BASE
+        self.download_base = OS_BASE
         self.remaining = None
         self.client = httpx.Client(timeout=30, follow_redirects=True, headers={
             "Api-Key": self.api_key, "User-Agent": UA, "Accept": "application/json"})
@@ -209,9 +221,9 @@ class OpenSubtitles:
     def close(self):
         self.client.close()
 
-    def _req(self, method: str, path: str, **kw) -> httpx.Response:
+    def _req(self, method: str, path: str, base: str | None = None, **kw) -> httpx.Response:
         for attempt in range(4):
-            r = self.client.request(method, f"{self.base}{path}", **kw)
+            r = self.client.request(method, f"{base or self.base}{path}", **kw)
             if r.status_code == 429:
                 time.sleep(2 + attempt * 3)
                 continue
@@ -224,12 +236,16 @@ class OpenSubtitles:
             return
         r = self._req("POST", "/login", json={"username": self.username,
                                               "password": self.password})
+        if r.status_code in (401, 403):
+            raise OpenSubtitlesAuthError(
+                f"OpenSubtitles rejected the login ({r.status_code}): {r.text[:200]}")
         if r.status_code != 200:
             raise RuntimeError(f"OpenSubtitles login failed ({r.status_code}): {r.text[:200]}")
         j = r.json()
         self.token = j.get("token")
         if j.get("base_url"):
-            self.base = f"https://{j['base_url']}/api/v1"
+            host = re.sub(r"^https?://", "", j["base_url"]).split("/")[0]
+            self.download_base = f"https://{host}/api/v1"
         self.remaining = (j.get("user") or {}).get("remaining_downloads")
 
     def search(self, **params) -> list[dict]:
@@ -238,20 +254,29 @@ class OpenSubtitles:
         params = dict(sorted((k, str(v).lower() if k != "query" else v)
                              for k, v in params.items()))
         r = self._req("GET", "/subtitles", params=params)
+        if r.status_code in (401, 403):
+            raise OpenSubtitlesAuthError(
+                f"OpenSubtitles rejected the API key ({r.status_code}): {r.text[:200]}")
         if r.status_code != 200:
             raise RuntimeError(f"OpenSubtitles search failed ({r.status_code}): {r.text[:200]}")
         return r.json().get("data") or []
 
     def download(self, file_id: int) -> str:
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
-        r = self._req("POST", "/download", json={"file_id": file_id, "sub_format": "srt"},
-                      headers=headers)
+        body = {"file_id": file_id, "sub_format": "srt"}
+        r = self._req("POST", "/download", base=self.download_base, json=body, headers=headers)
+        if _invalid_domain(r) and self.download_base != OS_BASE:
+            self.download_base = OS_BASE  # VIP server refused; use the main API from now on
+            r = self._req("POST", "/download", base=OS_BASE, json=body, headers=headers)
         if r.status_code in (406, 429):
             try:
                 msg = r.json().get("message")
             except ValueError:
                 msg = None
             raise QuotaExhausted(msg or r.text[:200])
+        if r.status_code in (401, 403):
+            raise OpenSubtitlesAuthError(
+                f"OpenSubtitles refused the download ({r.status_code}): {r.text[:200]}")
         if r.status_code != 200:
             raise RuntimeError(f"OpenSubtitles download failed ({r.status_code}): {r.text[:200]}")
         j = r.json()
@@ -355,13 +380,35 @@ def _strip_html(h: str) -> str:
     return re.sub(r"[ \t]+", " ", html.unescape(_HTML_TAG.sub(" ", h))).strip()
 
 
+def normalize_wiki(value: str) -> str:
+    """'pawpatrol', 'pawpatrol.fandom.com' or any URL on the wiki → 'pawpatrol' /
+    'host.example.org' (non-Fandom MediaWiki hosts are kept as hosts)."""
+    v = (value or "").strip()
+    v = re.sub(r"^https?://", "", v, flags=re.I).split("/")[0].split("?")[0].lower()
+    m = re.fullmatch(r"([a-z0-9-]+)\.fandom\.com", v)
+    return m.group(1) if m else v
+
+
+def normalize_page(value: str) -> str:
+    """A page title as typed or pasted: full URL, /wiki/ path, underscores and
+    %-escapes all become the plain title MediaWiki expects."""
+    from urllib.parse import unquote
+    v = (value or "").strip()
+    if "/wiki/" in v:
+        v = v.split("/wiki/", 1)[1]
+    elif "title=" in v:
+        v = v.split("title=", 1)[1].split("&")[0]
+    v = v.split("#")[0].split("?")[0]
+    return unquote(v).replace("_", " ").strip()
+
+
 def fandom_page(wiki: str, page: str) -> tuple[str | None, str]:
     """Fetch a wiki page. Returns (text, status) where status is
     "ok", "missing" (the wiki says the page doesn't exist) or "error" (blocked,
     rate-limited or unreachable — worth retrying later, NOT evidence it's missing)."""
-    wiki = wiki.strip()
+    wiki = normalize_wiki(wiki)
+    page = normalize_page(page)
     host = wiki if "." in wiki else f"{wiki}.fandom.com"
-    host = re.sub(r"^https?://", "", host).rstrip("/")
     api = f"https://{host}/api.php"
     missing = False
     with httpx.Client(timeout=30, headers={"User-Agent": BROWSER_UA},
@@ -491,9 +538,13 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
     work = [(e, False) for e in todo] + [(e, True) for e in upgrades]
     try:
         if os_.configured and todo:
-            os_.login()
-            if os_.remaining is not None:
-                ctx.log(f"OpenSubtitles: {os_.remaining} downloads remaining today.")
+            try:
+                os_.login()
+                if os_.remaining is not None:
+                    ctx.log(f"OpenSubtitles: {os_.remaining} downloads remaining today.")
+            except OpenSubtitlesAuthError as e:
+                quota_hit = str(e)
+                ctx.log(f"{e} — skipping OpenSubtitles for this fetch. Check Settings → OpenSubtitles.")
         elif not os_.configured and not wiki:
             ctx.log("No OpenSubtitles API key and no Fandom wiki set — nothing to fetch from.")
             return {"fetched": 0, "missing": len(todo)}
@@ -546,6 +597,12 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
             if ref is None and os_.configured and quota_hit is None:
                 try:
                     ref, note = fetch_opensubs(os_, series, ep, ctx)
+                except OpenSubtitlesAuthError as e:
+                    quota_hit = str(e)
+                    os_skipped = True
+                    note = ""
+                    ctx.log(f"{e} — skipping OpenSubtitles for the rest of this fetch. "
+                            "Check the API key under Settings → OpenSubtitles.")
                 except QuotaExhausted as e:
                     quota_hit = str(e)
                     os_skipped = True
