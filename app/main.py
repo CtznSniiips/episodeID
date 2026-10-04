@@ -109,7 +109,8 @@ def test_service(service: str):
             return {"ok": ok, "message": "faster-whisper installed" if ok else
                     "faster-whisper is not installed in this image"}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": str(e)[:300]}
+        from .titlecard import error_summary
+        return {"ok": False, "message": error_summary(e)[:400]}
     _404("Unknown service")
 
 

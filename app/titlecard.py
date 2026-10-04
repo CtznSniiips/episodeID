@@ -76,7 +76,7 @@ def _engine():
         except Exception as e:  # noqa: BLE001
             raise TitleCardUnavailable(f"OCR engine not installed ({e})")
         want = get_settings()["titlecard_ocr_device"]
-        gpu = want != "cpu" and _ocr_gpu_available()
+        gpu = want != "cpu" and not _accel.get("force_cpu") and _ocr_gpu_available()
         # Frames are already small (640x360). RapidOCR's default upscales them to a
         # 736 px short side before text detection, which more than doubles the work
         # and doesn't help with large title text.
@@ -226,10 +226,32 @@ def _sample(video: Path, start: float, length: float, fps: float,
     return []
 
 
+def error_summary(e: BaseException) -> str:
+    """The informative part of an error. RapidOCR wraps ONNX Runtime failures in a
+    full traceback string; the cause is on its last lines, not the first."""
+    lines = [l.strip() for l in str(e).splitlines() if l.strip()]
+    if not lines:
+        return type(e).__name__
+    last = re.sub(r"^[\w.]*?(\w+(Error|Exception|Fail)):\s*", r"\1: ", lines[-1])
+    return last[-400:]
+
+
 def _ocr_frame(img) -> list[list]:
+    global _ocr
     h, w = img.shape[:2]
     with _ocr_lock:
-        res, _ = _engine()(img, use_cls=False)
+        try:
+            res, _ = _engine()(img, use_cls=False)
+        except Exception as e:  # noqa: BLE001
+            if _accel.get("ocr", "").startswith("NVIDIA"):
+                # GPU OCR loaded but can't run here (driver/GPU too old for the bundled
+                # CUDA libraries, a missing library, out of memory…): use the CPU.
+                _accel["ocr_gpu_error"] = error_summary(e)
+                _accel["force_cpu"] = True
+                _ocr = None
+                res, _ = _engine()(img, use_cls=False)
+            else:
+                raise TitleCardUnavailable(f"OCR failed: {error_summary(e)}") from e
     out = []
     for box, text, conf in res or []:
         ys = [p[1] for p in box]
@@ -385,4 +407,6 @@ def acceleration_status(benchmark: bool = False) -> dict:
             _ocr_frame(img)
         out["ocr_ms"] = round((time.time() - t) / 3 * 1000)
     out["ocr"] = _accel.get("ocr")
+    if _accel.get("ocr_gpu_error"):
+        out["ocr"] = f"{out['ocr']} (GPU OCR failed, fell back: {_accel['ocr_gpu_error']})"
     return out

@@ -261,6 +261,12 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx) -> None:
     if not titlecard.available():
         ctx.log("Title cards: OCR engine not installed in this image — skipped.")
         return
+    try:
+        acc = titlecard.acceleration_status()
+        ctx.log(f"Title cards: video decode on {acc['decode'].upper()}"
+                + (f" ({acc['decode_note']})" if acc["decode_note"] else ""))
+    except Exception:  # noqa: BLE001
+        pass
     root = Path(series["path"])
     index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")))
     runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
@@ -341,6 +347,9 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx) -> None:
         if not cards and use_vision:
             cards = _vision_card(root / f["rel"], f, index, series["name"], ctx)
         report(f, cards, _apply_title_cards(f, cards))
+    if titlecard._accel.get("ocr_gpu_error") and not titlecard._accel.get("gpu_error_logged"):
+        titlecard._accel["gpu_error_logged"] = True
+        ctx.log(f"Title cards: GPU OCR failed, using the CPU instead — {titlecard._accel['ocr_gpu_error']}")
     if mode == "on" or status.get("has_cards"):
         w = learn()
         if w and w != status.get("window"):
