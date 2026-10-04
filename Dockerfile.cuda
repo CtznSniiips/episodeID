@@ -21,10 +21,13 @@ COPY requirements.txt .
 # onnxruntime-gpu replaces the CPU onnxruntime so title-card OCR runs on the GPU.
 # 1.26 is the last release built for CUDA 12, which matches CTranslate2 (Whisper),
 # so both share one set of CUDA libraries.
+# cuDNN is pinned to 9.10.2: cuDNN 9.11+ dropped GPUs older than Turing (GTX 10xx,
+# Quadro Pxxxx, Maxwell, Volta), which are common in home servers. 9.10.2 still
+# supports those and works the same on newer GPUs.
 RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" \
  && pip uninstall -y onnxruntime \
- && pip install --no-cache-dir "onnxruntime-gpu[cuda,cudnn]==1.26.*"
+ && pip install --no-cache-dir nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.10.2.*" \
+      "onnxruntime-gpu[cuda,cudnn]==1.26.*"
 
 # Let CTranslate2 find the pip-installed CUDA libraries.
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib

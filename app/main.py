@@ -99,15 +99,26 @@ def test_service(service: str):
                 return {"ok": False, "message": "OCR engine is not installed in this image"}
             st = titlecard.acceleration_status(benchmark=True)
             dec = {"cuda": "NVIDIA GPU (NVDEC)", "vaapi": "GPU (VAAPI)", "cpu": "CPU"}[st["decode"]]
-            msg = f"OCR: {st['ocr']} — {st['ocr_ms']} ms per frame. Video decode: {dec}."
+            msg = (f"OCR: {st['ocr']} — {st['ocr_ms']} ms per frame. Video decode: {dec}."
+                   + (f" GPU: {st['gpu']}." if st.get("gpu") else ""))
             if st["decode_note"]:
                 msg += " " + st["decode_note"]
             return {"ok": True, "message": msg}
         if service == "whisper":
             import importlib.util
             ok = importlib.util.find_spec("faster_whisper") is not None
-            return {"ok": ok, "message": "faster-whisper installed" if ok else
-                    "faster-whisper is not installed in this image"}
+            if not ok:
+                return {"ok": False, "message": "faster-whisper is not installed in this image"}
+            from . import transcribe as tr
+            tr._load()
+            model, device, compute = tr._model_key
+            gpu = titlecard.gpu_info()
+            msg = f"Whisper '{model}' loaded on {device.upper()} ({compute})"
+            if gpu and device == "cuda":
+                msg += f" — GPU: {gpu}"
+            if tr._gpu_error:
+                msg += f". GPU transcription failed earlier, using the CPU: {tr._gpu_error}"
+            return {"ok": True, "message": msg}
     except Exception as e:  # noqa: BLE001
         from .titlecard import error_summary
         return {"ok": False, "message": error_summary(e)[:400]}

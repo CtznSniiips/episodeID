@@ -390,6 +390,27 @@ def vision_frames(video: Path, start: float, length: float,
     return out
 
 
+def gpu_info() -> str | None:
+    """'Quadro P2000 (compute 6.1)' for the first NVIDIA GPU, if one is visible."""
+    if "gpu_info" not in _accel:
+        info = None
+        try:
+            r = subprocess.run(["nvidia-smi", "--query-gpu=name,compute_cap,driver_version",
+                                "--format=csv,noheader"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                name, cap, drv = [x.strip() for x in r.stdout.splitlines()[0].split(",")[:3]]
+                info = f"{name} (compute {cap}, driver {drv})"
+                try:
+                    if float(cap) < 7.5:
+                        info += " — pre-Turing GPU"
+                except ValueError:
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+        _accel["gpu_info"] = info
+    return _accel["gpu_info"]
+
+
 def acceleration_status(benchmark: bool = False) -> dict:
     """What title-card detection runs on, and optionally how fast OCR is."""
     out = {"decode": decode_method(), "decode_note": "", "ocr": None, "ocr_ms": None}
@@ -406,6 +427,7 @@ def acceleration_status(benchmark: bool = False) -> dict:
         for _ in range(3):
             _ocr_frame(img)
         out["ocr_ms"] = round((time.time() - t) / 3 * 1000)
+    out["gpu"] = gpu_info()
     out["ocr"] = _accel.get("ocr")
     if _accel.get("ocr_gpu_error"):
         out["ocr"] = f"{out['ocr']} (GPU OCR failed, fell back: {_accel['ocr_gpu_error']})"

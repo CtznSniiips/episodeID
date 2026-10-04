@@ -7,6 +7,7 @@ newer PyAV releases removed, and ffmpeg also handles every container/codec
 the library might hold."""
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -21,6 +22,7 @@ SAMPLE_RATE = 16000  # what Whisper expects
 _model = None
 _model_key = None
 _lock = threading.Lock()
+_gpu_error: str | None = None  # set when GPU transcription failed; CPU is used afterwards
 
 
 def _load():
@@ -34,12 +36,27 @@ def _load():
             device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
         except Exception:  # noqa: BLE001
             device = "cpu"
+    if _gpu_error:
+        device = "cpu"
     if compute == "default":
-        compute = "float16" if device == "cuda" else "int8"
-    key = (s["whisper_model"], device, compute)
+        compute = "int8"
+        if device == "cuda":
+            # Pascal and older run float16 very slowly (or not at all): use the best
+            # type this GPU supports rather than assuming float16.
+            try:
+                import ctranslate2
+                supported = ctranslate2.get_supported_compute_types("cuda")
+            except Exception:  # noqa: BLE001
+                supported = {"float32"}
+            compute = next(c for c in ("float16", "int8_float16", "int8_float32", "int8", "float32")
+                           if c in supported or c == "float32")
+    model_name = s["whisper_model"]
+    if _gpu_error and re.match(r"(large|medium|distil-large)", model_name):
+        model_name = "small"  # GPU-sized model would crawl on the CPU fallback
+    key = (model_name, device, compute)
     if _model is None or _model_key != key:
         from faster_whisper import WhisperModel
-        _model = WhisperModel(s["whisper_model"], device=device, compute_type=compute,
+        _model = WhisperModel(model_name, device=device, compute_type=compute,
                               download_root=str(CACHE_DIR / "whisper"))
         _model_key = key
     return _model
@@ -80,18 +97,33 @@ def transcribe(video: Path, ctx=None) -> list[Cue]:
     s = get_settings()
     lang = s["whisper_language"] or None
     audio = decode_audio(video, lang or "")
+    global _gpu_error, _model
     with _lock:
-        model = _load()
-        segments, info = model.transcribe(
-            audio, language=lang, vad_filter=True,
-            beam_size=1, condition_on_previous_text=False)
-        cues = []
-        total = info.duration or (len(audio) / SAMPLE_RATE) or 1
-        for seg in segments:
-            text = seg.text.strip()
-            if text:
-                cues.append(Cue(seg.start, seg.end, text))
+        try:
+            return _run(_load(), audio, lang, video, ctx)
+        except Exception as e:  # noqa: BLE001
+            if type(e).__name__ == "Cancelled" or not _model_key or _model_key[1] != "cuda":
+                raise
+            # GPU transcription failed (unsupported GPU/driver, out of memory…): CPU from now on.
+            _gpu_error = str(e).strip().splitlines()[-1][:300] if str(e).strip() else type(e).__name__
+            _model = None
             if ctx:
-                ctx.check_cancel()
-                ctx.status(f"Whisper: {video.name} {seg.end / total:.0%}")
-        return cues
+                ctx.log(f"  Whisper on the GPU failed ({_gpu_error}); using the CPU instead "
+                        "(with the 'small' model if a large one was selected).")
+            return _run(_load(), audio, lang, video, ctx)
+
+
+def _run(model, audio, lang, video: Path, ctx) -> list[Cue]:
+    segments, info = model.transcribe(
+        audio, language=lang, vad_filter=True,
+        beam_size=1, condition_on_previous_text=False)
+    cues = []
+    total = info.duration or (len(audio) / SAMPLE_RATE) or 1
+    for seg in segments:
+        text = seg.text.strip()
+        if text:
+            cues.append(Cue(seg.start, seg.end, text))
+        if ctx:
+            ctx.check_cancel()
+            ctx.status(f"Whisper: {video.name} {seg.end / total:.0%}")
+    return cues
