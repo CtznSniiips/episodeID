@@ -48,7 +48,8 @@ subtitles, references or anyone's episode numbering:
   `/dev/dri` is passed to the container. Everything falls back to the CPU on its own;
   *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
 - Only large on-screen text counts, and it must match one title clearly better than any
-  other, so signs and credits in the background are ignored. OCR results are cached.
+  other, so signs and credits in the background are ignored. OCR results are cached; to read
+  the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
 
 ### Safety
 - Nothing is deleted. Displaced files go to `<series>/_episodeid_backup/`: `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.

@@ -559,6 +559,8 @@ async function tabOptions() {
     <div class="field"><label>Check</label>
       <select name="title_cards_scope">${[["unconfirmed", "Only files the dialogue match didn't confirm"], ["all", "Every file (slower)"]].map(([v, t]) =>
         `<option value="${v}" ${(o.title_cards_scope || "unconfirmed") === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+    <div class="row"><div class="small muted" style="flex:1">Title-card OCR is cached, so rescans normally reuse it. Use this after an update that changes how cards are read, or if a card was misread.</div>
+      <button class="btn small" type="button" id="reread-cards">Rescan, re-reading title cards</button></div>
     </fieldset>
     <fieldset><legend>Fandom wiki transcripts</legend>
     <div class="row" style="margin-bottom:6px"><div class="small" style="flex:1">${wikiStatus(o)}</div>
@@ -585,6 +587,10 @@ async function tabOptions() {
         title_cards: f.title_cards.value, title_cards_scope: f.title_cards_scope.value } });
       toast("Saved");
     } catch (err) { fail(err); }
+  };
+  $("#reread-cards").onclick = () => {
+    if (!confirm("Scan again, reading every title card from the video files instead of the cache? This takes longer than a normal scan.")) return;
+    startJob("scan", { reread_cards: true }); toast("Rescanning — see the job log.");
   };
   $("#find-wiki").onclick = () => { startJob("fetch_refs", { find_wiki: true }); toast("Looking for the wiki — see the job log."); };
   $("#del").onclick = async () => {

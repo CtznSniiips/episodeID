@@ -1,6 +1,7 @@
 """Job handlers: the long-running work behind each button in the UI."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from . import db, fandom, llm, titlecard, tvdb
@@ -167,7 +168,7 @@ def job_scan(ctx, params):
             if sg.get("why"):
                 ctx.log(f"{'':<16}   {sg['code']}? {sg['why']}")
 
-    _titlecard_pass(series, files, eps, ctx)
+    _titlecard_pass(series, files, eps, ctx, reread=bool(params.get("reread_cards")))
 
     if llm.available():
         _llm_pass(series, files, eps, refs, ctx)
@@ -302,7 +303,7 @@ def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
     return notes
 
 
-def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx) -> None:
+def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: bool = False) -> None:
     s = get_settings()
     opts = dict(series.get("options") or {})
     mode = opts.get("title_cards", "auto")
@@ -322,13 +323,23 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx) -> None:
     runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
     runtime = runtimes[len(runtimes) // 2] if runtimes else None
     status = dict(opts.get("title_cards_status") or {})
+    force = 0.0
+    if reread:
+        # Re-read the videos instead of reusing cached OCR, and redo the auto test
+        # and learned position, since both came from the old reads.
+        force = time.time()
+        if mode == "auto":
+            status = {}
+        else:
+            status.pop("window", None)
+        ctx.log("Title cards: re-reading from the video files (cached OCR ignored).")
     scope_all = opts.get("title_cards_scope") == "all"
     done: set[str] = set()
     hit_times: list[float] = []
 
     def run(f: dict, learned) -> list[dict]:
         cards = titlecard.detect(root / f["rel"], float(f.get("duration") or 0), f["segments"],
-                                 index, learned, runtime, ctx)
+                                 index, learned, runtime, ctx, force)
         for c in cards:
             starts = titlecard.episode_starts(float(f.get("duration") or 0), f["segments"], runtime)
             base = max([x for x in starts if x <= c["time"]] or [0.0])

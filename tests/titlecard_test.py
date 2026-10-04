@@ -127,4 +127,10 @@ assert castle["kind"] == "rename" and "S02E33 - The Castle" in castle["targets"]
 assert castle["selected"], "title-card identification should be pre-ticked"
 pair = by["Show - S02E37 - The Boss.mkv"]
 assert pair["kind"] == "rename" and "S02E37-E38" in pair["targets"][0]["path"], pair
+# "Rescan, re-reading title cards": same result, read from the videos again.
+j = db.add_job("scan", sid, {"reread_cards": True})
+r2 = pipeline.job_scan(JobContext(j, sid), {"reread_cards": True})
+log = db.get_job(j)["log"] if isinstance(db.get_job(j).get("log"), str) else str(db.get_job(j))
+assert "re-reading from the video files" in log, log[-500:]
+print("re-read scan ok")
 print("PASS")

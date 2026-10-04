@@ -87,6 +87,18 @@ pipeline._apply_title_cards(f, [{**idx.read("SAVEA ROCKET ROLLERSKATER"), "time"
 assert f["segments"][0]["confidence"] == "conflict" and f["status"] == "LOW_CONFIDENCE", f["segments"]
 print("  lone card contradicting filename + weak dialogue → review")
 
+# Cached OCR from an older version that stopped reading too early must not be reused.
+L = lambda txt: [[txt, 0.95, 0.08, 0.4]]
+partial_frames = [{"t": 20.0 + i, "lines": L("PUPS SAVETHE BABY")} for i in range(7)]
+old = {"complete": False, "frames": partial_frames}            # old rule: stopped 6 s after a hit
+assert titlecard._reuse_cached(dict(old), idx, 1.0) is None, "early-stopped old cache must be re-read"
+ok = {"complete": False, "stopped_at": 33.0, "frames": [{"t": 20.0 + i, "lines": L("PUPS SAVETHE BABY")} for i in range(13)]}
+assert titlecard._reuse_cached(ok, idx, 1.0) is not None, "cache that covers the settle time is reused"
+gone = {"complete": False, "stopped_at": 27.0, "frames": [{"t": 20.0, "lines": L("XQZW")}]}
+assert titlecard._reuse_cached(gone, idx, 1.0) is None, "cache stopped on a no-longer-matching frame is re-read"
+assert titlecard._reuse_cached({"complete": True, "frames": [{"t": 1.0, "lines": []}]}, idx, 1.0) is not None
+print("  cached OCR: early-stopped old scans re-read, covering scans reused")
+
 print("End to end — animated cards:")
 FONT = next(p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",) if Path(p).exists())
 
@@ -119,4 +131,21 @@ for name, (l1, l2, expected, want) in videos.items():
     got = f["segments"][0]["code"] if f["segments"] else None
     print(f"  {name:7} cards={[(c['text'], c.get('code'), c['partial']) for c in cards]} → {got}")
     assert got == want, (name, cards)
+
+# Cached reads are reused; force=<job start> re-reads each window once.
+import time  # noqa: E402
+v = W / "baby.mkv"
+calls = []
+orig = titlecard._sample
+titlecard._sample = lambda *a, **k: calls.append(a) or orig(*a, **k)
+titlecard.detect(v, 60.0, [], idx)
+assert not calls, "second detect should come from the cache"
+t0 = time.time()
+titlecard.detect(v, 60.0, [], idx, force=t0)
+n = len(calls)
+assert n >= 1, "force must re-read the video"
+titlecard.detect(v, 60.0, [], idx, force=t0)
+assert len(calls) == n, "a window already re-read in this job is not read again"
+titlecard._sample = orig
+print(f"  force re-read: {n} window pass(es) re-decoded, then cached again")
 print("PASS")

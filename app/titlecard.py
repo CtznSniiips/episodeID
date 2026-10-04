@@ -297,42 +297,64 @@ def _cache_path(video: Path, start: float, length: float, fps: float,
 
 
 def scan_window(video: Path, start: float, length: float, index: TitleIndex,
-                ctx=None, stop_on_hit: bool = True) -> list[dict]:
+                ctx=None, stop_on_hit: bool = True, force: float = 0) -> list[dict]:
     """OCR one window of the video. Returns per-frame records [{t, lines, hit}].
     Keyframes are read first (fast); the window is only fully decoded if that
-    finds no title card."""
-    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key")
+    finds no title card. force=<timestamp> ignores OCR cached before that time
+    ("re-read title cards": each window is read once per job, not once per call)."""
+    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key", force)
     if any(fr.get("hit") and not fr["hit"]["partial"] for fr in frames):
         return frames
-    full = _scan_pass(video, start, length, index, ctx, stop_on_hit, "full")
+    full = _scan_pass(video, start, length, index, ctx, stop_on_hit, "full", force)
     return full if any(fr.get("hit") for fr in full) else frames
 
 
+def _settle(full_seen: bool) -> float:
+    return CARD_SETTLE if full_seen else CARD_SETTLE_PARTIAL
+
+
+def _reuse_cached(data: dict, index: TitleIndex, fps: float) -> list[dict] | None:
+    """Cached frames re-matched with the current rules, or None if they don't cover
+    what the current rules need (a scan stopped early, after a card that is now read
+    differently or now needs longer to settle)."""
+    frames = data["frames"]
+    for fr in frames:
+        fr["hit"] = index.match_frame(fr["lines"])
+    if data.get("complete", True):
+        return frames
+    first, full_seen = None, False
+    for i, fr in enumerate(frames):
+        if first is not None and fr["t"] > first + _settle(full_seen):
+            return frames[:i]  # the current rules would have stopped here
+        if fr["hit"]:
+            first = fr["t"] if first is None else first
+            full_seen = full_seen or not fr["hit"]["partial"]
+    if first is None:
+        return None  # stopped on a frame that no longer counts as a card
+    # Where the old scan stopped (older caches: the sample after the last stored frame).
+    stopped = data.get("stopped_at", frames[-1]["t"] + 1.0 / max(fps, 0.01))
+    return frames if stopped > first + _settle(full_seen) else None
+
+
 def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
-               ctx, stop_on_hit: bool, mode: str) -> list[dict]:
+               ctx, stop_on_hit: bool, mode: str, force: float = 0) -> list[dict]:
     fps = float(get_settings()["titlecard_fps"])
     cache = _cache_path(video, start, length, fps, mode)
-    if cache.exists():
-        data = json.loads(cache.read_text())
-        frames = data["frames"]
-        for fr in frames:
-            fr["hit"] = index.match_frame(fr["lines"])
-        complete = data.get("complete", True)
-        # A cached early-stopped scan is only reusable if its hit still matches.
-        if complete or any(fr["hit"] for fr in frames):
+    if cache.exists() and not (force and cache.stat().st_mtime < force):
+        frames = _reuse_cached(json.loads(cache.read_text()), index, fps)
+        if frames is not None:
             return frames
 
     import cv2
     raw = _sample(video, start, length, fps, mode)
     frames, last_thumb = [], None
-    complete = True
+    complete, stopped_at = True, None
     first_hit_t, full_seen = None, False
     for t, img in raw:
         if ctx:
             ctx.check_cancel()
-        if first_hit_t is not None and stop_on_hit and t > first_hit_t + (CARD_SETTLE if full_seen
-                                                                         else CARD_SETTLE_PARTIAL):
-            complete = False  # the card has had time to finish animating in
+        if first_hit_t is not None and stop_on_hit and t > first_hit_t + _settle(full_seen):
+            complete, stopped_at = False, t  # the card has had time to finish animating in
             break
         thumb = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (32, 18)).astype("int16")
         if first_hit_t is None and last_thumb is not None and abs(thumb - last_thumb).mean() < 3:
@@ -345,7 +367,7 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
             first_hit_t = t if first_hit_t is None else first_hit_t
             full_seen = full_seen or not hit["partial"]
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"complete": complete,
+    cache.write_text(json.dumps({"complete": complete, "stopped_at": stopped_at,
                                  "frames": [{"t": f["t"], "lines": f["lines"]} for f in frames]}))
     return frames
 
@@ -391,7 +413,7 @@ def episode_starts(duration: float, segments: list[dict],
 
 def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex,
            learned_window: list | None = None, runtime_min: float | None = None,
-           ctx=None) -> list[dict]:
+           ctx=None, force: float = 0) -> list[dict]:
     """Title cards found in the file: [{code, title, text, score, time, frames}].
     For each probable episode start, look in the window learned for this series
     first (fast), then the full window if nothing turned up."""
@@ -401,10 +423,10 @@ def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex
         cards = []
         if learned_window:
             a, b = learned_window
-            cards = cards_from_frames(scan_window(video, s + a, b - a, index, ctx))
+            cards = cards_from_frames(scan_window(video, s + a, b - a, index, ctx, force=force))
         if not any(not c["partial"] for c in cards):
             more = cards_from_frames(
-                scan_window(video, s, min(full, max(10.0, duration - s)), index, ctx))
+                scan_window(video, s, min(full, max(10.0, duration - s)), index, ctx, force=force))
             cards = more if more else cards
         for c in cards:
             if not any(c.get("code") == f.get("code") and c.get("text") == f.get("text")
