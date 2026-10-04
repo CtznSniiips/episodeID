@@ -25,6 +25,9 @@ services:
       # Mount your TV library at the SAME path Sonarr sees is easiest to reason about,
       # but any path works. It must be read-write.
       - /mnt/user/tv:/media/tv
+    # Intel/AMD integrated graphics: faster title-card video decoding (VAAPI)
+    # devices:
+    #   - /dev/dri:/dev/dri
     restart: unless-stopped
     # GPU Whisper: build Dockerfile.cuda and uncomment
     # deploy:

@@ -1,5 +1,7 @@
 # EpisodeID — CPU image (Whisper runs on CPU with int8).
 # For NVIDIA GPUs build Dockerfile.cuda instead.
+# Intel/AMD integrated graphics: pass /dev/dri to the container and title-card
+# video decoding uses VAAPI automatically.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -8,6 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg tini libgl1 libglib2.0-0 \
+      intel-media-va-driver mesa-va-drivers \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

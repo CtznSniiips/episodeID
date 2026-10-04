@@ -662,6 +662,10 @@ async function renderSettings() {
     ${f("titlecard_fps", "Frames per second", "1 is enough for cards shown for 2+ seconds.")}
     ${cb("titlecard_vision", "Use a vision model when OCR can't read a card", "Sends a few frames to the AI endpoint below. Needs a vision-capable model (e.g. qwen2.5vl in Ollama).")}
     ${f("llm_vision_model", "Vision model", "Leave blank to use the AI model below.")}
+    ${sel("titlecard_ocr_device", "OCR on", [["auto", "Auto — NVIDIA GPU when available (-cuda image)"], ["cpu", "CPU"]])}
+    ${sel("titlecard_hwaccel", "Video decoding", [["auto", "Auto — use a GPU if one is passed to the container"], ["cuda", "NVIDIA (NVDEC)"], ["vaapi", "Intel / AMD (VAAPI, needs /dev/dri)"], ["off", "CPU only"]],
+      "Hardware decoding falls back to the CPU automatically if it doesn't work for a file.")}
+    ${test("titlecards")}
   </fieldset>
   <fieldset><legend>AI fallback (optional, OpenAI-compatible)</legend>
     <p class="muted small" style="margin-top:0">Only used for files the dialogue match can't settle, choosing among a short list of

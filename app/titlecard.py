@@ -34,6 +34,7 @@ _ocr = None
 _ocr_lock = threading.Lock()
 
 FRAME_W = 640           # OCR works on frames scaled to this width
+FRAME_H = 360           # …and roughly this height (16:9)
 MIN_BOX_FRAC = 0.06     # title text must be at least this fraction of frame height
 MIN_CONF = 0.75         # OCR confidence for a line to be considered
 
@@ -51,6 +52,22 @@ def available() -> bool:
         return False
 
 
+_accel: dict = {}  # what's actually in use, for the UI and logs
+
+
+def _ocr_gpu_available() -> bool:
+    try:
+        import onnxruntime as ort
+        if hasattr(ort, "preload_dlls"):
+            try:  # CUDA/cuDNN from NVIDIA's pip wheels (CUDA image)
+                ort.preload_dlls(cuda=True, cudnn=True, msvc=False)
+            except Exception:  # noqa: BLE001
+                pass
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _engine():
     global _ocr
     if _ocr is None:
@@ -58,8 +75,59 @@ def _engine():
             from rapidocr_onnxruntime import RapidOCR
         except Exception as e:  # noqa: BLE001
             raise TitleCardUnavailable(f"OCR engine not installed ({e})")
-        _ocr = RapidOCR()
+        want = get_settings()["titlecard_ocr_device"]
+        gpu = want != "cpu" and _ocr_gpu_available()
+        # Frames are already small (640x360). RapidOCR's default upscales them to a
+        # 736 px short side before text detection, which more than doubles the work
+        # and doesn't help with large title text.
+        kw = {"det_limit_side_len": FRAME_H, "det_limit_type": "min"}
+        if gpu:
+            kw.update(det_use_cuda=True, cls_use_cuda=True, rec_use_cuda=True)
+        _ocr = RapidOCR(**kw)
+        _accel["ocr"] = "NVIDIA GPU (CUDA)" if gpu else "CPU"
     return _ocr
+
+
+# ------------------------------------------------------------- video decode
+
+def _hwaccels() -> set[str]:
+    if "ffmpeg_hwaccels" not in _accel:
+        try:
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-hwaccels"], capture_output=True,
+                               text=True, timeout=20)
+            _accel["ffmpeg_hwaccels"] = {l.strip() for l in r.stdout.splitlines()[1:] if l.strip()}
+        except Exception:  # noqa: BLE001
+            _accel["ffmpeg_hwaccels"] = set()
+    return _accel["ffmpeg_hwaccels"]
+
+
+def _render_node() -> str | None:
+    nodes = sorted(Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").exists() else []
+    return str(nodes[0]) if nodes else None
+
+
+def decode_method() -> str:
+    """'cuda', 'vaapi' or 'cpu' — what ffmpeg will use to decode video for title cards."""
+    if _accel.get("decode_failed"):
+        return "cpu"
+    want = get_settings()["titlecard_hwaccel"]
+    have = _hwaccels()
+    if want == "off":
+        return "cpu"
+    nvidia = Path("/dev/nvidia0").exists() or Path("/dev/nvidiactl").exists()
+    if want in ("auto", "cuda") and "cuda" in have and nvidia:
+        return "cuda"
+    if want in ("auto", "vaapi") and "vaapi" in have and _render_node():
+        return "vaapi"
+    return "cpu"
+
+
+def _hw_args(method: str) -> list[str]:
+    if method == "cuda":
+        return ["-hwaccel", "cuda"]
+    if method == "vaapi":
+        return ["-hwaccel", "vaapi", "-hwaccel_device", _render_node() or "/dev/dri/renderD128"]
+    return []
 
 
 # --------------------------------------------------------------- matching
@@ -120,22 +188,42 @@ class TitleIndex:
 
 # --------------------------------------------------------------- sampling
 
-def _sample(video: Path, start: float, length: float, fps: float) -> list[tuple[float, "object"]]:
+def _sample(video: Path, start: float, length: float, fps: float,
+            mode: str = "full") -> list[tuple[float, "object"]]:
+    """Frames at `fps` from [start, start+length].
+    mode "key":  decode keyframes only — ~8x faster; title cards almost always begin
+                 on a cut, where encoders place a keyframe.
+    mode "full": decode everything except B-frames (same frames out, ~1/3 less work)."""
     import cv2
-    tmp = Path(tempfile.mkdtemp(prefix="tc_", dir=str(CACHE_DIR)))
-    try:
-        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{max(0.0, start):.2f}",
-               "-t", f"{length:.2f}", "-i", str(video), "-map", "0:v:0", "-an", "-sn",
-               "-vf", f"fps={fps},scale={FRAME_W}:-2", "-q:v", "3", str(tmp / "%05d.jpg")]
-        subprocess.run(cmd, capture_output=True, timeout=900)
-        frames = []
-        for i, f in enumerate(sorted(tmp.glob("*.jpg"))):
-            img = cv2.imread(str(f))
-            if img is not None:
-                frames.append((round(max(0.0, start) + i / fps, 2), img))
-        return frames
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    skip = ["-skip_frame", "nokey"] if mode == "key" else ["-skip_frame", "bidir"]
+    method = decode_method()
+    for attempt_method in ([method, "cpu"] if method != "cpu" else ["cpu"]):
+        tmp = Path(tempfile.mkdtemp(prefix="tc_", dir=str(CACHE_DIR)))
+        try:
+            cmd = (["ffmpeg", "-nostdin", "-v", "error"] + _hw_args(attempt_method) + skip +
+                   ["-ss", f"{max(0.0, start):.2f}", "-t", f"{length:.2f}", "-i", str(video),
+                    "-map", "0:v:0", "-an", "-sn", "-vf", f"fps={fps},scale={FRAME_W}:-2",
+                    "-q:v", "3", str(tmp / "%05d.jpg")])
+            r = subprocess.run(cmd, capture_output=True, timeout=900)
+            files = sorted(tmp.glob("*.jpg"))
+            if attempt_method != "cpu" and (r.returncode != 0 or not files):
+                # Hardware decode not usable here (no device passed through, unsupported
+                # codec, missing driver…): use the CPU from now on.
+                err = [l for l in r.stderr.decode("utf-8", "replace").splitlines() if l.strip()]
+                why = next((l for l in err if re.search(r"(?i)cuda|vaapi|va_|device|hwaccel|driver", l)),
+                           err[0] if err else "no frames produced")
+                _accel["decode_failed"] = f"{attempt_method}: {why.strip()[:200]}"
+                continue
+            _accel["decode"] = attempt_method
+            frames = []
+            for i, f in enumerate(files):
+                img = cv2.imread(str(f))
+                if img is not None:
+                    frames.append((round(max(0.0, start) + i / fps, 2), img))
+            return frames
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return []
 
 
 def _ocr_frame(img) -> list[list]:
@@ -150,16 +238,28 @@ def _ocr_frame(img) -> list[list]:
     return [l for l in out if l[0]]
 
 
-def _cache_path(video: Path, start: float, length: float, fps: float) -> Path:
-    spec = hashlib.sha1(f"{start:.0f}|{length:.0f}|{fps}".encode()).hexdigest()[:10]
+def _cache_path(video: Path, start: float, length: float, fps: float,
+                mode: str = "full") -> Path:
+    tag = f"{start:.0f}|{length:.0f}|{fps}" + ("" if mode == "full" else f"|{mode}")
+    spec = hashlib.sha1(tag.encode()).hexdigest()[:10]
     return CACHE_DIR / "titlecards" / f"{_cache_key(video)}_{spec}.json"
 
 
 def scan_window(video: Path, start: float, length: float, index: TitleIndex,
                 ctx=None, stop_on_hit: bool = True) -> list[dict]:
-    """OCR one window of the video. Returns per-frame records [{t, lines, hit}]."""
+    """OCR one window of the video. Returns per-frame records [{t, lines, hit}].
+    Keyframes are read first (fast); the window is only fully decoded if that
+    finds no title card."""
+    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key")
+    if any(fr.get("hit") for fr in frames):
+        return frames
+    return _scan_pass(video, start, length, index, ctx, stop_on_hit, "full")
+
+
+def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
+               ctx, stop_on_hit: bool, mode: str) -> list[dict]:
     fps = float(get_settings()["titlecard_fps"])
-    cache = _cache_path(video, start, length, fps)
+    cache = _cache_path(video, start, length, fps, mode)
     if cache.exists():
         data = json.loads(cache.read_text())
         frames = data["frames"]
@@ -171,7 +271,7 @@ def scan_window(video: Path, start: float, length: float, index: TitleIndex,
             return frames
 
     import cv2
-    raw = _sample(video, start, length, fps)
+    raw = _sample(video, start, length, fps, mode)
     frames, last_thumb = [], None
     complete = True
     for t, img in raw:
@@ -265,4 +365,24 @@ def vision_frames(video: Path, start: float, length: float,
             ok, buf = cv2.imencode(".jpg", got[0][1], [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 out.append((t, buf.tobytes()))
+    return out
+
+
+def acceleration_status(benchmark: bool = False) -> dict:
+    """What title-card detection runs on, and optionally how fast OCR is."""
+    out = {"decode": decode_method(), "decode_note": "", "ocr": None, "ocr_ms": None}
+    if _accel.get("decode_failed"):
+        out["decode_note"] = "hardware decode failed earlier, using CPU: " + _accel["decode_failed"][-160:]
+    if benchmark:
+        import time
+        import numpy as np
+        import cv2
+        img = np.full((FRAME_H, FRAME_W, 3), 40, np.uint8)
+        cv2.putText(img, "THE TEST CARD", (60, 200), cv2.FONT_HERSHEY_DUPLEX, 2.0, (255, 255, 255), 5)
+        _ocr_frame(img)  # load models / warm up
+        t = time.time()
+        for _ in range(3):
+            _ocr_frame(img)
+        out["ocr_ms"] = round((time.time() - t) / 3 * 1000)
+    out["ocr"] = _accel.get("ocr")
     return out

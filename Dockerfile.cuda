@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
     MEDIA_ROOT=/media CONFIG_DIR=/config CACHE_DIR=/cache \
     HF_HOME=/cache/huggingface PUID=99 PGID=100 UMASK=002 PORT=8686 \
     WHISPER_DEVICE=cuda WHISPER_MODEL=large-v3 \
-    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg tini libgl1 libglib2.0-0 \
@@ -18,11 +18,16 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.txt .
+# onnxruntime-gpu replaces the CPU onnxruntime so title-card OCR runs on the GPU.
+# 1.26 is the last release built for CUDA 12, which matches CTranslate2 (Whisper),
+# so both share one set of CUDA libraries.
 RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+ && pip install --no-cache-dir nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" \
+ && pip uninstall -y onnxruntime \
+ && pip install --no-cache-dir "onnxruntime-gpu[cuda,cudnn]==1.26.*"
 
 # Let CTranslate2 find the pip-installed CUDA libraries.
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib
 
 COPY app ./app
 COPY docker/entrypoint.sh /entrypoint.sh

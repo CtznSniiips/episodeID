@@ -94,6 +94,15 @@ def test_service(service: str):
                           headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=15)
             r.raise_for_status()
             return {"ok": True, "message": f"Sonarr {r.json().get('version')}"}
+        if service == "titlecards":
+            if not titlecard.available():
+                return {"ok": False, "message": "OCR engine is not installed in this image"}
+            st = titlecard.acceleration_status(benchmark=True)
+            dec = {"cuda": "NVIDIA GPU (NVDEC)", "vaapi": "GPU (VAAPI)", "cpu": "CPU"}[st["decode"]]
+            msg = f"OCR: {st['ocr']} — {st['ocr_ms']} ms per frame. Video decode: {dec}."
+            if st["decode_note"]:
+                msg += " " + st["decode_note"]
+            return {"ok": True, "message": msg}
         if service == "whisper":
             import importlib.util
             ok = importlib.util.find_spec("faster_whisper") is not None

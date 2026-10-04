@@ -44,6 +44,8 @@ SCHEMA: dict[str, tuple[object, str, bool]] = {
     "titlecard_scan_seconds": (180, "TITLECARD_SCAN_SECONDS", False),
     "titlecard_fps": (1.0, "TITLECARD_FPS", False),
     "titlecard_vision": (False, "TITLECARD_VISION", False),
+    "titlecard_ocr_device": ("auto", "TITLECARD_OCR_DEVICE", False),   # auto | cpu
+    "titlecard_hwaccel": ("auto", "TITLECARD_HWACCEL", False),         # auto | off | cuda | vaapi
     "llm_vision_model": ("", "LLM_VISION_MODEL", False),
     # Sonarr
     "sonarr_url": ("", "SONARR_URL", False),

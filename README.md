@@ -41,6 +41,12 @@ subtitles, references or anyone's episode numbering:
   including two-episode files with two cards.
 - Optional: send hard-to-read cards to a vision-capable model on the AI endpoint
   (*Settings → Title cards*).
+- **Speed / hardware acceleration.** Keyframes are read first (about 8x less decoding;
+  title cards nearly always start on a cut), and a window is only fully decoded when
+  that finds nothing. OCR runs on the GPU in the `-cuda` image (ONNX Runtime CUDA), and
+  video decoding uses NVDEC there, or VAAPI on Intel/AMD integrated graphics when
+  `/dev/dri` is passed to the container. Everything falls back to the CPU on its own;
+  *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
 - Only large on-screen text counts, and it must match one title clearly better than any
   other, so signs and credits in the background are ignored. OCR results are cached.
 
