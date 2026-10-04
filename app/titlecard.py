@@ -35,7 +35,8 @@ _ocr_lock = threading.Lock()
 
 FRAME_W = 640           # OCR works on frames scaled to this width
 FRAME_H = 360           # …and roughly this height (16:9)
-MIN_BOX_FRAC = 0.045    # title text must be at least this fraction of frame height
+MIN_BOX_FRAC = 0.035    # lines this tall (fraction of frame height) can be part of a title…
+MIN_TITLE_FRAC = 0.045  # …but every read needs at least one line this tall (ignores small signs)
 MIN_CONF = 0.75         # OCR confidence for a line to be considered
 CARD_SETTLE = 6         # keep reading this many seconds after a card first appears…
 CARD_SETTLE_PARTIAL = 12  # …or this long if only part of a title has been read so far
@@ -163,14 +164,23 @@ class TitleIndex:
         scored = sorted(((difflib.SequenceMatcher(None, c, t["ns"]).ratio(), i)
                          for i, t in enumerate(self.titles)
                          if abs(len(t["ns"]) - len(c)) <= max(4, len(t["ns"]) // 2)), reverse=True)
+        # Titles this text could be the beginning of. Allow about one OCR slip per dozen
+        # characters — "PUPS MAKETHE" must not count as the start of "Pups Save the…".
+        need_prefix = 1 - max(1, len(c) // 12) / len(c)
         longer = [t for t in self.titles if len(t["ns"]) >= len(c) + 3
-                  and difflib.SequenceMatcher(None, c, t["ns"][:len(c)]).ratio() >= 0.9]
+                  and difflib.SequenceMatcher(None, c, t["ns"][:len(c)]).ratio() >= need_prefix]
         top = self.titles[scored[0][1]] if scored else None
         score = scored[0][0] if scored else 0.0
         second = next((sc for sc, i in scored[1:] if self.titles[i]["ns"] != top["ns"]), 0.0) \
             if top else 0.0
         need = 0.9 if top and len(top["ns"]) <= 8 else 0.85
         full = top is not None and score >= need and score - second >= 0.06
+        if full:
+            # The matched title is itself how other titles begin ("Mighty Pups" →
+            # "Mighty Pups Stop the…"): a banner, or a card still animating in — even if
+            # OCR added junk in front ("AW MIGHTYPUPS").
+            longer += [t for t in self.titles if len(t["ns"]) >= len(top["ns"]) + 3
+                       and t["ns"].startswith(top["ns"]) and t not in longer]
         if full and not longer:
             return {"code": top["code"], "title": top["title"], "text": text,
                     "score": round(score, 3), "partial": False}
@@ -190,11 +200,13 @@ class TitleIndex:
         if not big:
             return None
         big.sort(key=lambda l: l[3])
-        # Titles often wrap ("THE" / "VOICE"): try single lines and runs of 2–3 lines.
+        # Titles often wrap ("THE" / "VOICE", "RESCUE WHEELS" / "PUPS" / "SAVE THE" / …):
+        # try single lines and runs of consecutive lines.
         cands = []
         for i in range(len(big)):
-            for j in range(i + 1, min(i + 3, len(big)) + 1):
-                cands.append(" ".join(l[0] for l in big[i:j]))
+            for j in range(i + 1, min(i + 5, len(big)) + 1):  # cards can span 4–5 lines
+                if max(l[2] for l in big[i:j]) >= MIN_TITLE_FRAC:
+                    cands.append(" ".join(l[0] for l in big[i:j]))
         reads = [r for r in (self.read(c) for c in dict.fromkeys(cands)) if r]
         if not reads:
             return None

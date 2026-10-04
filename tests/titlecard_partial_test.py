@@ -21,7 +21,11 @@ EPS = [(0, 14, "Mighty Pups"), (1, 24, "Pups Save the Bay"), (1, 42, "Pups Save 
        (6, 11, "Pups and the Stinky Bubble Trouble"), (6, 12, "Pups Save the Baby Ostriches"),
        (7, 23, "Pups Save a Rocket Roller Skater"), (7, 24, "Pups Save Ryder's Surprise"),
        (10, 30, "Mighty Pups Stop the Mighty Queen"), (10, 31, "Mighty Pups Stop the Hiccups"),
-       (10, 32, "Mighty Pups vs. The Mighty Cheetah")]
+       (10, 32, "Mighty Pups vs. The Mighty Cheetah"),
+       (11, 1, "Rescue Wheels: Pups Save the Teetering Tower"), (11, 2, "Rescue Wheels: Pups Save the Spelunkers"),
+       (11, 3, "Rescue Wheels: Pups Save the Risky Race"), (11, 4, "Rescue Wheels: Pups Save the Runaway Truck"),
+       (11, 38, "Fire Rescue: Pups Save the Flaming Flounder"), (11, 39, "Fire Rescue: Pups Make the News"),
+       (11, 40, "Fire Rescue: Pups Save a Baby Goat Birthday"), (11, 41, "Fire Rescue: Pups Save a S'more-mergency")]
 episodes = [{"season": s, "episode": e, "title": t} for s, e, t in EPS]
 idx = titlecard.TitleIndex(episodes, include_specials=True)
 
@@ -33,6 +37,13 @@ cases = {
     "PUPS SAVETHE BABY": ("partial", {"S06E12"}),
     "SAVEA ROCKET ROLLERSKATER": ("full", "S07E23"),
     "PUPS SAVE RYDER'S": ("partial", {"S07E24"}),
+    # second scan
+    "AW MIGHTYPUPS": ("partial", {"S00E14", "S10E30", "S10E31"}),
+    "RESCUE WHEELS PUPS": ("partial", {"S11E01", "S11E02", "S11E03", "S11E04"}),
+    "FIRERESCUE PUPS SAVETHE": ("partial", {"S11E38"}),
+    "FIRE RESCUE PUPS MAKETHE": ("partial", {"S11E39"}),
+    "FIRERESCUE PUPS SAVEA": ("partial", {"S11E40", "S11E41"}),
+    "RESCUE WHEELS PUPS SAVE THE TEETERING TOWER": ("full", "S11E01"),
 }
 for text, (kind, want) in cases.items():
     r = idx.read(text)
@@ -49,6 +60,25 @@ f = {"expected": ["S06E11", "S06E12"], "text_source": "embedded",
 pipeline._apply_title_cards(f, [{**idx.read("PUPS SAVETHE BABY"), "time": 700.0}])
 assert f["segments"][-1]["code"] == "S06E12" and f["status"] == "OK", f["segments"]
 print("  partial 'PUPS SAVETHE BABY' + filename S06E11E12 → S06E12, file OK")
+
+# "MAKETHE" must not be read as the start of "…Pups Save the Flaming Flounder".
+assert "S11E38" not in idx.read("FIRE RESCUE PUPS MAKETHE")["candidates"]
+
+# Two-episode files: each half's partial card is checked against the episode the
+# filename puts at that point — even when the dialogue split doesn't line up.
+for name, exp, t1, t2, want in (
+        ("Rescue Wheels", ["S11E01", "S11E02"], "RESCUE WHEELS PUPS", "RESCUE WHEELS PUPS", ["S11E01", "S11E02"]),
+        ("Fire Rescue", ["S11E38", "S11E39"], "FIRERESCUE PUPS SAVETHE", "FIRE RESCUE PUPS MAKETHE", ["S11E38", "S11E39"]),
+        ("Fire Rescue 2", ["S11E40", "S11E41"], "FIRERESCUE PUPS SAVEA", "FIRERESCUE PUPS SAVEA", ["S11E40", "S11E41"]),
+        ("Mighty Pups", ["S10E30", "S10E31"], "AW MIGHTYPUPS", "MIGHTYPUPS STOPTHE HICCUPS", ["S10E30", "S10E31"])):
+    f = {"expected": exp, "text_source": "embedded", "duration": 1397.0,
+         "segments": [{"start": 0, "end": 617, "code": "S01E01", "score": .05, "confidence": "low", "alternatives": []},
+                      {"start": 617, "end": 702, "code": "S02E02", "score": .04, "confidence": "low", "alternatives": []},
+                      {"start": 702, "end": 1397, "code": "S03E03", "score": .05, "confidence": "low", "alternatives": []}]}
+    pipeline._apply_title_cards(f, [{**idx.read(t1), "time": 47.0}, {**idx.read(t2), "time": 707.0}])
+    got = [sg["code"] for sg in f["segments"] if sg.get("title_card")]
+    print(f"  {name:13} cards → {got}")
+    assert got == want, (name, f["segments"])
 
 # A lone complete card that contradicts filename and weak dialogue goes to review.
 f = {"expected": ["S07E24"], "text_source": "embedded",

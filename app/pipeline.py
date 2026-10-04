@@ -189,6 +189,18 @@ def _fmt_t(t: float) -> str:
     return f"{int(t // 60)}:{int(t % 60):02d}"
 
 
+def _expected_at(expected: list[str], t: float, duration: float) -> str | None:
+    """The episode the filename puts at time t: for "S11E38E39" the first half is
+    S11E38 and the second S11E39."""
+    if not expected:
+        return None
+    if len(expected) == 1:
+        return expected[0]
+    if duration <= 0:
+        return None  # position unknown: callers fall back to all of the filename's episodes
+    return expected[min(len(expected) - 1, int(t / (duration / len(expected))))]
+
+
 def _resolve_partial(c: dict, sg: dict | None, expected: list[str]) -> str | None:
     """A partial read ("PUPS SAVE RYDER'S…", "MIGHTY PUPS") lists the titles it could
     be the start of. It can confirm the dialogue's match or the filename when either
@@ -220,7 +232,9 @@ def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
         # No usable dialogue: the title cards alone identify the episode(s).
         usable = []
         for i, c in enumerate(f["title_cards"]):
-            code = c["code"] if not c.get("partial") else _resolve_partial(c, None, expected)
+            pos = _expected_at(expected, c["time"], dur)
+            code = c["code"] if not c.get("partial") else \
+                _resolve_partial(c, None, [pos] if pos else expected)
             if code:
                 usable.append((code, c))
         for i, (code, c) in enumerate(usable):
@@ -240,7 +254,7 @@ def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
             sg = segs[idx]
             if sg.get("title_card"):
                 continue
-            pos_expected = expected[idx] if len(expected) == len(segs) else None
+            pos_expected = _expected_at(expected, c["time"], dur)
             if c.get("partial"):
                 code = _resolve_partial(c, sg, [pos_expected] if pos_expected else expected)
                 if not code:
