@@ -11,7 +11,7 @@ from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import get_dialogue
 from .planner import build_plan, list_videos
-from .references import (detect_fandom_wiki, ep_code, load_refs, refresh_references,
+from .references import (SAME_EPISODE_SCORE, detect_fandom_wiki, ep_code, load_refs, refresh_references,
                          verify_flagged)
 
 
@@ -156,6 +156,7 @@ def job_scan(ctx, params):
             continue
         res = matcher.match_file(dlg["cues"], dlg["duration"]) if matcher and dlg["cues"] \
             else {"segments": [], "whole": []}
+        _discount_unreferenced(res["segments"], expected, dlg["duration"], refs)
         status, note = classify(expected, res["segments"], dlg["source"])
         files.append({"rel": rel, "size": v.stat().st_size, "duration": dlg["duration"],
                       "text_source": dlg["source"], "expected": expected,
@@ -190,6 +191,24 @@ def _fmt_t(t: float) -> str:
     return f"{int(t // 60)}:{int(t % 60):02d}"
 
 
+def _discount_unreferenced(segs: list[dict], expected: list[str], duration: float,
+                           refs: dict) -> None:
+    """Dialogue matched to an episode other than the filename's only counts against
+    the filename when the filename's episode has a reference. Without one the
+    matcher can only ever pick the closest other episode — and shows that reuse
+    plots (PAW Patrol has several elephant rescues) make that look convincing."""
+    for sg in segs:
+        if not expected or sg["code"] in expected:
+            continue
+        pos = _expected_at(expected, (sg["start"] + sg["end"]) / 2, duration)
+        cands = [pos] if pos else expected
+        if any(c in refs for c in cands) or float(sg.get("score") or 0) >= SAME_EPISODE_SCORE:
+            continue  # the filename's episode was a candidate, or this is plainly that episode
+        sg.update(confidence="low", no_ref_for=cands[0],
+                  why=f"{' / '.join(cands)} (per the filename) has no reference yet, so the "
+                      f"dialogue could only match other episodes — {sg['code']} was the closest")
+
+
 def _expected_at(expected: list[str], t: float, duration: float) -> str | None:
     """The episode the filename puts at time t: for "S11E38E39" the first half is
     S11E38 and the second S11E39."""
@@ -219,8 +238,10 @@ def _resolve_partial(c: dict, sg: dict | None, expected: list[str]) -> str | Non
     return None
 
 
-def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
-    """Merge title-card evidence into a scanned file's segments. Returns log notes."""
+def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None) -> list[str]:
+    """Merge title-card evidence into a scanned file's segments. Returns log notes.
+    runtimes: episode code → minutes (TVDB), used to judge whether a stretch of
+    weak dialogue fits inside a card-confirmed episode."""
     keep = ("code", "title", "text", "score", "time", "partial", "candidates")
     f["title_cards"] = [{k: c.get(k) for k in keep} for c in cards]
     if not cards:
@@ -249,31 +270,61 @@ def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
         if usable:
             notes.append("identified from title card" + ("s" if len(usable) > 1 else ""))
     else:
+        confirmed: set[str] = set()  # filename episodes a title card has confirmed
         for c in f["title_cards"]:
             # the segment this card belongs to: the last one starting before (card time + 60 s)
             idx = max([j for j, sg in enumerate(segs) if sg["start"] <= c["time"] + 60] or [0])
             sg = segs[idx]
-            if sg.get("title_card"):
-                continue
             pos_expected = _expected_at(expected, c["time"], dur)
             if c.get("partial"):
-                code = _resolve_partial(c, sg, [pos_expected] if pos_expected else expected)
+                code = _resolve_partial(c, None if c["time"] > sg["end"] + 15 else sg,
+                                        [pos_expected] if pos_expected else expected)
                 if not code:
                     continue  # incomplete read that matches nothing else: no evidence
                 c = {**c, "code": code}
+            if c["time"] > sg["end"] + 15:
+                # The card is in a stretch where the dialogue matched nothing (typically an
+                # episode with no reference): the card starts a segment of its own.
+                nxt = segs[idx + 1]["start"] if idx + 1 < len(segs) else dur
+                ok = c["code"] in expected or not expected or set(expected) <= confirmed
+                new = {"start": sg["end"], "end": nxt, "code": c["code"], "score": c["score"],
+                       "margin": 0, "alternatives": [], "title_card": c,
+                       "confidence": "high" if ok else "conflict",
+                       "evidence": "title+filename" if c["code"] in expected else "title",
+                       "why": "" if ok else f"title card reads '{c['text']}' ({c['code']}) where the "
+                                            f"dialogue matched nothing; the filename says "
+                                            f"{', '.join(expected)}"}
+                segs.insert(idx + 1, new)
+                if c["code"] in expected:
+                    confirmed.add(c["code"])
+                notes.append(f"title card '{c['text']}' → {c['code']} where the dialogue matched nothing")
+                continue
+            if sg.get("title_card"):
+                continue
             sg["title_card"] = c
             old = sg["code"]
             alts = {a["code"] for a in sg.get("alternatives") or []}
+            if c["code"] in expected:
+                confirmed.add(c["code"])
             if c["code"] == old:
                 sg.update(confidence="high", evidence="dialogue+title", why="")
             elif c["code"] in expected:
+                if sg.get("no_ref_for") == c["code"]:
+                    why = (f"no reference for {c['code']} yet, so the dialogue matched the closest "
+                           f"other episode ({old}); title card and filename both say {c['code']}")
+                    notes.append(f"title card '{c['text']}' confirms the filename ({c['code']} "
+                                 f"has no reference; dialogue's closest was {old})")
+                else:
+                    why = (f"dialogue matched {old}; title card and filename both say "
+                           f"{c['code']} — the reference for {old} may be wrong")
+                    notes.append(f"title card '{c['text']}' confirms the filename; dialogue said {old} "
+                                 f"(check the reference for {old})")
                 sg.update(dialogue_code=old, code=c["code"], confidence="high",
-                          evidence="title+filename",
-                          why=f"dialogue matched {old}; title card and filename both say "
-                              f"{c['code']} — the reference for {old} may be wrong")
-                notes.append(f"title card '{c['text']}' confirms the filename; dialogue said {old} "
-                             f"(check the reference for {old})")
-            elif sg.get("confidence") != "high" and (c["code"] in alts or not expected):
+                          evidence="title+filename", why=why)
+            elif sg.get("confidence") != "high" and (c["code"] in alts or not expected
+                                                     or set(expected) <= confirmed):
+                # Weak dialogue, and the card either is one of its runner-up matches or names
+                # an extra episode in a file whose named episodes are all accounted for.
                 sg.update(dialogue_code=old, code=c["code"], confidence="high",
                           evidence="title", why="")
                 notes.append(f"weak dialogue match{' ' + old if old else ''} settled by title card")
@@ -287,8 +338,27 @@ def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
                                  f"is unclear ({old or '—'})"))
                 notes.append(f"CONFLICT: title card says {c['code']}, dialogue {old or '—'}, "
                              f"filename {', '.join(expected) or '—'}")
-        merged: list[dict] = []
+        # A weak stretch of dialogue right after a card-confirmed episode, naming an
+        # episode the filename doesn't, is part of that episode (as long as it fits in
+        # the episode's runtime) — not a separate episode to cut out.
+        absorbed: list[dict] = []
         for sg in segs:
+            prev = absorbed[-1] if absorbed else None
+            if (prev and prev.get("title_card") and prev.get("confidence") == "high"
+                    and not sg.get("title_card") and sg.get("confidence") == "low"
+                    and sg["code"] not in expected and sg["code"] != prev["code"]):
+                rt_min = (runtimes or {}).get(prev["code"])
+                if not rt_min or sg["end"] - prev["start"] <= rt_min * 60 * 1.4:
+                    prev["end"] = sg["end"]
+                    prev.setdefault("absorbed", []).append(
+                        {"start": sg["start"], "end": sg["end"], "code": sg["code"],
+                         "score": sg.get("score")})
+                    notes.append(f"weak {sg['code']} match at {_fmt_t(sg['start'])}–{_fmt_t(sg['end'])} "
+                                 f"kept with {prev['code']} (title card)")
+                    continue
+            absorbed.append(sg)
+        merged: list[dict] = []
+        for sg in absorbed:
             if merged and merged[-1]["code"] == sg["code"] and \
                     merged[-1].get("confidence") == sg.get("confidence"):
                 merged[-1]["end"] = sg["end"]
@@ -296,8 +366,18 @@ def _apply_title_cards(f: dict, cards: list[dict]) -> list[str]:
                 merged.append(sg)
         segs = merged
     f["segments"] = segs
+    f.pop("hold", None)
     f["status"], note = classify(expected, segs, f.get("text_source") or "none")
+    detected = {sg["code"] for sg in segs}
+    if f["status"] == "MISMATCH" and expected and detected < set(expected):
+        # Cards confirm part of the filename and nothing contradicts the rest: there is
+        # just no evidence for the rest (no reference, card not found). Leave it alone.
+        missing = [c for c in expected if c not in detected]
+        f["status"], f["hold"] = "LOW_CONFIDENCE", True
+        notes.append(f"no evidence either way for {', '.join(missing)} — left as named")
     if notes and f["status"] != "LOW_CONFIDENCE":
+        note = "; ".join(notes)
+    elif notes and f["status"] == "LOW_CONFIDENCE" and not note.startswith("At least"):
         note = "; ".join(notes)
     f["note"] = note
     return notes
@@ -322,6 +402,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")))
     runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
     runtime = runtimes[len(runtimes) // 2] if runtimes else None
+    rt = {c: e["runtime"] for c, e in eps.items() if e.get("runtime")}
     status = dict(opts.get("title_cards_status") or {})
     force = 0.0
     if reread:
@@ -339,9 +420,10 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
 
     def run(f: dict, learned) -> list[dict]:
         cards = titlecard.detect(root / f["rel"], float(f.get("duration") or 0), f["segments"],
-                                 index, learned, runtime, ctx, force)
+                                 index, learned, runtime, ctx, force, len(f.get("expected") or []))
         for c in cards:
-            starts = titlecard.episode_starts(float(f.get("duration") or 0), f["segments"], runtime)
+            starts = titlecard.episode_starts(float(f.get("duration") or 0), f["segments"], runtime,
+                                              len(f.get("expected") or []))
             base = max([x for x in starts if x <= c["time"]] or [0.0])
             hit_times.append(c["time"] - base)
         return cards
@@ -377,7 +459,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             # readable episode title counts as "this show has title cards".
             if cards and (f["status"] != "OK" or any(c["code"] in confirmed for c in cards)):
                 hits += 1
-            report(f, cards, _apply_title_cards(f, cards))
+            report(f, cards, _apply_title_cards(f, cards, rt))
             done.add(f["rel"])
         has = bool(pool) and hits >= max(2, (len(pool) + 1) // 2)
         status = {"has_cards": has, "probed": len(pool), "hits": hits}
@@ -410,7 +492,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         cards = run(f, learn())
         if not cards and use_vision:
             cards = _vision_card(root / f["rel"], f, index, series["name"], ctx)
-        report(f, cards, _apply_title_cards(f, cards))
+        report(f, cards, _apply_title_cards(f, cards, rt))
     if titlecard._accel.get("ocr_gpu_error") and not titlecard._accel.get("gpu_error_logged"):
         titlecard._accel["gpu_error_logged"] = True
         ctx.log(f"Title cards: GPU OCR failed, using the CPU instead — {titlecard._accel['ocr_gpu_error']}")

@@ -214,7 +214,8 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
                 "segments": f.get("segments") or [], "selected": False}
 
         usable = [c for c in chosen if c[2] != "low"]
-        if f["status"] in ("NO_TEXT",) or not usable or len(usable) != len(chosen):
+        if f["status"] in ("NO_TEXT",) or not usable or len(usable) != len(chosen) \
+                or (f.get("hold") and f["status"] != "MANUAL"):
             # Not enough evidence to act on every part of this file.
             items.append({**base, "kind": "review",
                           "reason": f.get("note") or "Needs a decision",

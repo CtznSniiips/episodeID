@@ -31,6 +31,10 @@ UA = f"EpisodeID v{__version__}"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
+# TF-IDF similarity at or above which two texts are the same episode (different
+# transcriptions of it); look-alike episodes of a show stay well below.
+SAME_EPISODE_SCORE = 0.35
+
 
 def ep_code(season: int, episode: int) -> str:
     return f"S{season:02d}E{episode:02d}"
@@ -592,7 +596,7 @@ def verify_flagged(series: dict, ctx) -> dict:
         best_i = next((i for i in order if codes[i] != code), None)
         best_code, best = (codes[best_i], float(sims[best_i])) if best_i is not None else (None, 0.0)
         target = r.get("os_title_code")
-        if best_code and best >= 0.35:
+        if best_code and best >= SAME_EPISODE_SCORE:
             (refs_dir(tvdb_id) / f"{code}.json").unlink(missing_ok=True)
             misses[code] = f"OpenSubtitles' subtitle for {code} was {best_code}'s dialogue"
             result["removed"] += 1

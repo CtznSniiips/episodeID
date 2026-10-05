@@ -401,25 +401,37 @@ def cards_from_frames(frames: list[dict]) -> list[dict]:
 
 
 def episode_starts(duration: float, segments: list[dict],
-                   runtime_min: float | None) -> list[float]:
-    """Where each episode in the file probably begins."""
+                   runtime_min: float | None, n_expected: int = 0) -> list[float]:
+    """Where each episode in the file probably begins: at 0, where the dialogue
+    switches episode, where a stretch of unmatched dialogue begins (an episode with no
+    reference matches nothing), and where the filename's episodes would start
+    ("S09E31E32" → half way)."""
     starts = [0.0]
     for sg in segments[1:]:
-        starts.append(max(0.0, float(sg.get("start", 0)) - 20))
-    if len(segments) <= 1 and runtime_min and duration > 1.6 * runtime_min * 60:
-        starts.append(max(0.0, duration / 2 - 90))  # likely a second episode, no dialogue split
-    return [x for x in dict.fromkeys(round(x, 1) for x in starts) if x < duration]
+        starts.append(float(sg.get("start", 0)) - 20)
+    for a, b in zip(segments, segments[1:] + [{"start": duration}]):
+        if float(b["start"]) - float(a.get("end", 0)) >= 60 and float(a.get("end", 0)) < duration - 120:
+            starts.append(float(a["end"]) - 20)
+    if n_expected > 1 and duration > 0:
+        starts += [duration * k / n_expected - 90 for k in range(1, n_expected)]
+    elif len(segments) <= 1 and runtime_min and duration > 1.6 * runtime_min * 60:
+        starts.append(duration / 2 - 90)  # likely a second episode, no dialogue split
+    out: list[float] = []
+    for x in sorted(round(max(0.0, x), 1) for x in starts):
+        if x < duration and not (out and x - out[-1] < 45):  # scan windows overlap anyway
+            out.append(x)
+    return out
 
 
 def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex,
            learned_window: list | None = None, runtime_min: float | None = None,
-           ctx=None, force: float = 0) -> list[dict]:
+           ctx=None, force: float = 0, n_expected: int = 0) -> list[dict]:
     """Title cards found in the file: [{code, title, text, score, time, frames}].
     For each probable episode start, look in the window learned for this series
     first (fast), then the full window if nothing turned up."""
     full = float(get_settings()["titlecard_scan_seconds"])
     found: list[dict] = []
-    for s in episode_starts(duration, segments, runtime_min):
+    for s in episode_starts(duration, segments, runtime_min, n_expected):
         cards = []
         if learned_window:
             a, b = learned_window
