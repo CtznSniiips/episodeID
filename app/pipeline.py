@@ -271,6 +271,7 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
             notes.append("identified from title card" + ("s" if len(usable) > 1 else ""))
     else:
         confirmed: set[str] = set()  # filename episodes a title card has confirmed
+        originals = {id(sg): dict(sg) for sg in segs}  # what the dialogue said, before cards
         for c in f["title_cards"]:
             # the segment this card belongs to: the last one starting before (card time + 60 s)
             idx = max([j for j, sg in enumerate(segs) if sg["start"] <= c["time"] + 60] or [0])
@@ -300,7 +301,24 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
                 notes.append(f"title card '{c['text']}' → {c['code']} where the dialogue matched nothing")
                 continue
             if sg.get("title_card"):
-                continue
+                first = sg["title_card"]
+                lead = min(120.0, max(5.0, float(first["time"]) - float(sg["start"])))
+                cut = float(c["time"]) - lead
+                if first.get("code") == c["code"] or cut - sg["start"] < 240 or sg["end"] - cut < 120:
+                    continue  # same title again, or too close to the first card to be another episode
+                # A second, different title inside one stretch of dialogue: the dialogue
+                # matched one episode across both (e.g. neither has a reference), so the
+                # card marks where the next episode starts. Split the segment there; the
+                # new part starts from what the dialogue said, before the first card.
+                o = originals.get(id(sg), sg)
+                piece = {k: v for k, v in o.items() if k not in (
+                    "title_card", "dialogue_code", "evidence", "title_conflict", "why", "no_ref_for")}
+                piece.update(start=round(cut, 1), end=sg["end"])
+                if o.get("no_ref_for"):
+                    piece["no_ref_for"] = pos_expected or o["no_ref_for"]
+                sg["end"] = round(cut, 1)
+                segs.insert(idx + 1, piece)
+                idx, sg = idx + 1, piece
             sg["title_card"] = c
             old = sg["code"]
             alts = {a["code"] for a in sg.get("alternatives") or []}
@@ -309,7 +327,11 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
             if c["code"] == old:
                 sg.update(confidence="high", evidence="dialogue+title", why="")
             elif c["code"] in expected:
-                if sg.get("no_ref_for") == c["code"]:
+                if old in expected:
+                    why = (f"the dialogue matched {old} through this part as well; title card and "
+                           f"filename both say {c['code']}")
+                    notes.append(f"title card '{c['text']}' confirms {c['code']} (filename)")
+                elif sg.get("no_ref_for") == c["code"]:
                     why = (f"no reference for {c['code']} yet, so the dialogue matched the closest "
                            f"other episode ({old}); title card and filename both say {c['code']}")
                     notes.append(f"title card '{c['text']}' confirms the filename ({c['code']} "

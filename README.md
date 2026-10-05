@@ -7,7 +7,7 @@
 
 # EpisodeID
 
-Works out which episode each video file **really** contains by reading its dialogue, checking for title cards, and optionally checking subtitle content against TVDB summaries; then renames (and if needed splits) files to TVDB numbering so they line up with Sonarr. It works with any series and runs as a Docker container with a web UI.
+Works out which episode each video file **really** contains by reading its dialogue, then renames (and if needed splits) files to TVDB numbering so they line up with Sonarr. It works with any series and runs as a Docker container with a web UI.
 
 ## How it works
 

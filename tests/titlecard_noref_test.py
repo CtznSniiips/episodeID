@@ -86,3 +86,18 @@ st = titlecard.episode_starts(2811, [seg(0, 1463, "S07E22"), seg(2318, 2811, "S0
 print("scan starts S07E34 file:", st)
 assert any(1400 <= x <= 1463 for x in st), st
 print("PASS")
+
+# The S10 screenshot: dialogue matched ONE episode across the whole two-episode file, so
+# both cards land in the same segment. The second must split it, not be dropped.
+EPS2 = [(10, 1, "Pups Save the Wacky Water Skiers"), (10, 2, "Pups Save the Mayor's Assistant"),
+        (10, 3, "Pups Save a High-Flying Hen"), (10, 4, "Pups Save a Sloth")]
+idx = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in EPS + EPS2])
+refs.update({"S10E01": "x", "S10E02": "x", "S10E03": "x"})
+for name, exp, dlg, conf, c1, c2 in (
+        ("S10E01E02", ["S10E01", "S10E02"], "S10E01", "high", "PUPS SAVETHE WAQLY WATERSKIERS", "PUPS SAVE THE MAYORS ASSISTANT"),
+        ("S10E03E04", ["S10E03", "S10E04"], "S10E02", "high", "PUPS SAVEA HIGH-FLYING HEN", "PUPS SAVE A SLOTH")):
+    f, got = run(exp, 1397, [seg(0, 1397, dlg, conf)], [(c1, 48), (c2, 745)])
+    print(name, f["status"], got)
+    assert [c for c, *_ in got] == exp and f["status"] == "OK", (name, f["segments"])
+    assert 650 <= got[0][2] <= 700, got  # split ~ where the second episode starts (745 - 48)
+print("PASS (single-segment files)")
