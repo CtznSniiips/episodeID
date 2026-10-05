@@ -5,13 +5,21 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light;
 }
+/* Theme: follows the system unless chosen with the button in the header
+   (data-theme="light" | "dark" on <html>). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #12151a; --panel: #1a1e25; --panel-2: #222731; --text: #e6e9ee; --muted: #9aa4b1;
     --border: #2d333e; --accent: #5b8ff0; --accent-text: #0d1117;
     --ok: #48bb78; --warn: #ecc94b; --bad: #fc8181; --ai: #b794f4; --info: #63b3ed;
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+    --bg: #12151a; --panel: #1a1e25; --panel-2: #222731; --text: #e6e9ee; --muted: #9aa4b1;
+    --border: #2d333e; --accent: #5b8ff0; --accent-text: #0d1117;
+    --ok: #48bb78; --warn: #ecc94b; --bad: #fc8181; --ai: #b794f4; --info: #63b3ed;
+    color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
@@ -115,3 +123,9 @@ form.settings legend { font-weight: 600; padding: 0 6px; }
 }
 .field input[type=checkbox] { justify-self: start; width: 18px; height: 18px; }
 .grow-input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+
+.theme-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
+  padding: 0; border: 1px solid var(--border); background: var(--panel); color: var(--muted);
+  border-radius: 8px; cursor: pointer; flex: none; }
+.theme-btn:hover { background: var(--panel-2); color: var(--text); }
+.theme-btn svg { width: 18px; height: 18px; }
