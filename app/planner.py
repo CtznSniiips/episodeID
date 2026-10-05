@@ -307,23 +307,7 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
                       "targets": targets, "selected": not ai})
         moving.add(rel)
 
-    # 3. Files whose episode name is now needed by a confirmed file, but which
-    #    themselves stay put unverified → move aside so Sonarr doesn't see two.
-    by_rel = {it["source"]: it for it in items}
-    for code, new_owner in claimed_targets.items():
-        for occ in occupants.get(code, []):
-            if occ == new_owner or occ in moving:
-                continue
-            it = by_rel[occ]
-            if it["kind"] in ("review",):
-                it.update(kind="aside", bucket="unverified",
-                          reason=f"Its name ({code}) is needed by {new_owner}; "
-                                 f"this file couldn't be verified",
-                          targets=[{"path": f"{backup}/unverified/{occ}"}],
-                          selected=True)
-                moving.add(occ)
-
-    # 4. Distrust changes that rest on a reference whose numbering is disputed
+    # 3. Distrust changes that rest on a reference whose numbering is disputed
     #    (OpenSubtitles/IMDb number the episode differently from TVDB). Those can
     #    hold the neighbouring episode's dialogue, which looks exactly like two
     #    correctly named files that need swapping.
@@ -342,6 +326,39 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
             it["ref_warning"] = True
             it["reason"] = (f"Check first — {details}. Fetch references again once more wiki "
                             "transcripts are in to re-check it, or upload the right subtitle.")
+
+    # 4. Files whose episode name is now needed by a confirmed file, but which
+    #    themselves stay put unverified → move aside so Sonarr doesn't see two.
+    #    Only pre-ticked when the file taking the name is itself pre-ticked (not an AI
+    #    guess, not held back by a reference warning), and never for a file whose own
+    #    title card confirmed its name: two files then claim the same episode, and
+    #    which one really has it is for you to decide.
+    by_rel = {it["source"]: it for it in items}
+    for code, new_owner in claimed_targets.items():
+        owner = by_rel[new_owner]
+        for occ in occupants.get(code, []):
+            if occ == new_owner or occ in moving:
+                continue
+            it = by_rel[occ]
+            if it["kind"] not in ("review",):
+                continue
+            card_ok = sorted({sg["code"] for sg in it.get("segments") or []
+                              if sg.get("title_card") and sg.get("code") in it["expected"]})
+            how = "AI suggestion" if owner.get("ai") else "title card" if all(
+                "title" in (sg.get("evidence") or "") for sg in owner.get("segments") or []
+                if sg.get("code") == code) else "dialogue"
+            if card_ok:
+                it["reason"] = (f"{(it.get('reason') or '').rstrip('. ')}. {code} is also claimed by "
+                                f"{new_owner} ({how}); this file's title card confirms "
+                                f"{', '.join(card_ok)} — check which file really has {code}.")
+                it["claimed_by"] = new_owner
+                continue
+            it.update(kind="aside", bucket="unverified",
+                      reason=f"Its name ({code}) is needed by {new_owner} ({how}); "
+                             f"this file couldn't be verified",
+                      targets=[{"path": f"{backup}/unverified/{occ}"}],
+                      selected=bool(owner.get("selected")))
+            moving.add(occ)
 
     for i, it in enumerate(items):
         it["id"] = i
