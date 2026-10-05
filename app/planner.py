@@ -28,7 +28,14 @@ QUALITY_RE = re.compile(
 _BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
-def replace_colons(name: str, mode: str = "smart") -> str:
+# Sonarr's FileNameBuilder: with "Replace Illegal Characters" on, these are swapped
+# for the matching character; off, they're removed. Colons follow "Colon Replacement".
+_SONARR_BAD = ("\\", "/", "<", ">", "?", "*", "|", '"')
+_SONARR_GOOD = ("+", "+", "", "", "!", "-", "", "")
+_CONTROL = re.compile(r"[\x00-\x1f]")
+
+
+def replace_colons(name: str, mode: str = "smart", custom: str = "") -> str:
     """Colons can't be in filenames; replace them the way Sonarr's "Colon Replacement"
     setting does, so names match what Sonarr would write."""
     if mode == "delete":
@@ -38,15 +45,30 @@ def replace_colons(name: str, mode: str = "smart") -> str:
     if mode == "space_dash":
         return name.replace(":", " -")
     if mode == "space_dash_space":
-        return re.sub(r"\s*:\s*", " - ", name)
+        return name.replace(":", " - ")
+    if mode == "custom":
+        return name.replace(":", custom)
     # smart: "Up: Pups" → "Up - Pups", "10:30" → "10-30"
-    name = re.sub(r"\s*:\s+", " - ", name)
-    return name.replace(":", "-")
+    return name.replace(": ", " - ").replace(":", "-")
+
+
+def clean_token(text: str, settings: dict | None = None) -> str:
+    """Clean a series or episode title for a filename exactly as Sonarr does."""
+    st = settings or {}
+    replace = st.get("replace_illegal_characters", True)
+    for bad, good in zip(_SONARR_BAD, _SONARR_GOOD):
+        text = text.replace(bad, good if replace else "")
+    text = replace_colons(text, st.get("colon_replacement", "smart"),
+                          st.get("colon_replacement_custom", ""))
+    text = _CONTROL.sub("", text)
+    return text.lstrip(" .").rstrip(" ")
 
 
 def sanitize(name: str) -> str:
-    name = _BAD.sub("", name).replace("  ", " ")
-    return name.strip().rstrip(".")
+    """Last-resort safety for the assembled name (e.g. characters typed into the
+    naming format itself)."""
+    name = clean_token(name, {"replace_illegal_characters": False, "colon_replacement": "delete"})
+    return re.sub(r"\s{2,}", " ", name).strip()
 
 
 class _EpNum:
@@ -71,12 +93,11 @@ class _EpNum:
 def episode_filename(series_name: str, eps: list[dict], ext: str, original: str,
                      settings: dict) -> str:
     q = QUALITY_RE.search(original)
-    colons = settings.get("colon_replacement", "smart")
     tokens = {
-        "series": replace_colons(series_name, colons),
+        "series": clean_token(series_name, settings),
         "season": eps[0]["season"],
         "episode": _EpNum([e["episode"] for e in eps], settings["multi_episode_style"]),
-        "title": " + ".join(replace_colons(e["title"], colons) for e in eps),
+        "title": " + ".join(clean_token(e["title"], settings) for e in eps),
         "quality": q.group(1) if q else "",
         "year": "",
     }

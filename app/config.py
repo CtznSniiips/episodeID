@@ -60,7 +60,11 @@ SCHEMA: dict[str, tuple[object, str, bool]] = {
     # Naming (Sonarr "Standard" default)
     "naming_format": ("{series} - S{season:02d}E{episode:02d} - {title} {quality}", "NAMING_FORMAT", False),
     "multi_episode_style": ("prefixed_range", "MULTI_EPISODE_STYLE", False),
-    "colon_replacement": ("smart", "COLON_REPLACEMENT", False),  # as Sonarr: smart|delete|dash|space_dash|space_dash_space
+    # Filename cleaning, as Sonarr's Media Management → "Replace Illegal Characters" /
+    # "Colon Replacement" (smart|delete|dash|space_dash|space_dash_space|custom)
+    "replace_illegal_characters": (True, "REPLACE_ILLEGAL_CHARACTERS", False),
+    "colon_replacement": ("smart", "COLON_REPLACEMENT", False),
+    "colon_replacement_custom": ("", "COLON_REPLACEMENT_CUSTOM", False),
     "season_folder_format": ("Season {season:02d}", "SEASON_FOLDER_FORMAT", False),
     "specials_folder": ("Specials", "SPECIALS_FOLDER", False),
     "backup_folder": ("_episodeid_backup", "BACKUP_FOLDER", False),

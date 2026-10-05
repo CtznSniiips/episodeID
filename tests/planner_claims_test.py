@@ -65,6 +65,13 @@ assert planner.replace_colons("Mighty Pups, Charged Up: Pups vs. the Copycat") =
     "Mighty Pups, Charged Up - Pups vs. the Copycat"
 assert planner.replace_colons("At 10:30", "smart") == "At 10-30"
 assert planner.replace_colons("A: B", "delete") == "A B"
+# Other illegal characters, as Sonarr's FileNameBuilder.CleanFileName
+ct = planner.clean_token
+assert ct("Who's Afraid of the Big Bad Wolf?") == "Who's Afraid of the Big Bad Wolf!"
+assert ct("AC/DC <Live> *Encore* \"Hits\" | B\\C") == "AC+DC Live -Encore- Hits  B+C"
+assert ct("What?", {"replace_illegal_characters": False}) == "What"
+assert ct("Part 1: The Start", {"colon_replacement": "custom", "colon_replacement_custom": " ~ "}) == "Part 1 ~  The Start"
+assert ct("...Hello. ") == "Hello."
 series["episodes"] += [{"season": 6, "episode": 39, "title": "Mighty Pups, Charged Up: Pups vs. the Copycat"},
                        {"season": 6, "episode": 44, "title": "Mighty Pups, Charged Up: Pups Stop a Big Bad Bot"},
                        {"season": 6, "episode": 45, "title": "Mighty Pups, Charged Up: Mighty Pups Versus the Dome"}]
