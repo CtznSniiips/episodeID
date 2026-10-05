@@ -90,6 +90,7 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 | `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | off | e.g. `http://ollama:11434/v1`, `qwen3:8b` |
 | `SONARR_URL`, `SONARR_API_KEY` | | Triggers a series rescan after apply/undo |
 | `NAMING_FORMAT` | `{series} - S{season:02d}E{episode:02d} - {title} {quality}` | `{quality}` is carried over from the old filename |
+| `COLON_REPLACEMENT` | `smart` | Same choices as Sonarr: `smart` ("Up: Pups" → "Up - Pups"), `delete`, `dash`, `space_dash`, `space_dash_space` |
 | `MULTI_EPISODE_STYLE` | `prefixed_range` | `S01E01-E02` (Sonarr default), `extend`, `repeat` |
 | `MIN_SCORE`, `MIN_MARGIN`, `MIN_SEGMENT_SECONDS` | `0.12`, `0.04`, `240` | Matching thresholds |
 

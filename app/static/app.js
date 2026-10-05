@@ -731,6 +731,7 @@ async function renderSettings() {
     ${test("sonarr")}</fieldset>
   <fieldset><legend>Naming</legend>
     ${f("naming_format", "Episode file name", "Tokens: {series} {season:02d} {episode:02d} {title} {quality}. {quality} is carried over from the old name (e.g. WEBDL-1080p).")}
+    ${sel("colon_replacement", "Colon replacement", [["smart", "Smart — \"Up: Pups\" → \"Up - Pups\" (Sonarr)"], ["delete", "Delete"], ["dash", "Replace with dash"], ["space_dash", "Replace with space dash"], ["space_dash_space", "Replace with space dash space"]])}
     ${sel("multi_episode_style", "Multi-episode style", [["prefixed_range", "Prefixed range — S01E01-E02 (Sonarr default)"], ["extend", "Extend — S01E01-02"], ["repeat", "Repeat — S01E01E02"]])}
     ${f("season_folder_format", "Season folder", "Used only when a season folder doesn't exist yet.")}
     ${f("specials_folder", "Specials folder")}

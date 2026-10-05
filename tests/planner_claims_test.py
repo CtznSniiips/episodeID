@@ -59,4 +59,34 @@ for label, second in (
     c = by[C]
     print(f"{'':10} C: {c['kind']} sel={c['selected']} — {c['reason']}")
     assert c["kind"] == "aside" and c["selected"], c
+
+# The S06E39 / S06E44E45 screenshot: AI agreeing with the filename is not a rename.
+assert planner.replace_colons("Mighty Pups, Charged Up: Pups vs. the Copycat") == \
+    "Mighty Pups, Charged Up - Pups vs. the Copycat"
+assert planner.replace_colons("At 10:30", "smart") == "At 10-30"
+assert planner.replace_colons("A: B", "delete") == "A B"
+series["episodes"] += [{"season": 6, "episode": 39, "title": "Mighty Pups, Charged Up: Pups vs. the Copycat"},
+                       {"season": 6, "episode": 44, "title": "Mighty Pups, Charged Up: Pups Stop a Big Bad Bot"},
+                       {"season": 6, "episode": 45, "title": "Mighty Pups, Charged Up: Mighty Pups Versus the Dome"}]
+E = "Season 6/Paw Patrol - S06E39 - Mighty Pups, Charged Up - Pups vs. the Copycat WEBRip-1080p.mkv"
+F = "Season 6/Paw Patrol - S06E44E45 - Mighty Pups, Charged Up - Pups Stop a Big Bad Bot + Mighty Pups, Charged Up - Mighty Pups Versus the Dome HDTV-1080p.mkv"
+(root / "Season 6").mkdir(exist_ok=True)
+for rel in (E, F):
+    (root / rel).touch()
+files = [
+    {"rel": E, "expected": ["S06E39"], "status": "NO_MATCH", "duration": 1393, "segments": [
+        {"start": 0, "end": 1393, "code": None, "score": 0, "confidence": "none",
+         "llm": {"code": "S06E39", "confidence": 1.0}}]},
+    {"rel": F, "expected": ["S06E44", "S06E45"], "status": "LOW_CONFIDENCE", "duration": 1393, "segments": [
+        {"start": 0, "end": 608, "code": "S06E09", "score": .15, "confidence": "low",
+         "llm": {"code": "S06E44", "confidence": 1.0}}]},
+]
+by = {it["source"]: it for it in planner.build_plan(series, {"files": files})}
+for rel in (E, F):
+    print(f"{by[rel]['kind']:7} sel={by[rel]['selected']} — {by[rel]['reason']}")
+assert by[E]["kind"] == "ok", by[E]
+assert by[F]["kind"] == "review" and not by[F]["selected"] and "S06E45" in by[F]["reason"], by[F]
+# A Sonarr-named file is "correct" as named (colon → " - ").
+eps39 = [e for e in series["episodes"] if (e["season"], e["episode"]) == (6, 39)]
+assert planner.episode_filename("Paw Patrol", eps39, ".mkv", E, planner.get_settings()) == Path(E).name
 print("PASS")

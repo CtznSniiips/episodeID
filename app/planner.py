@@ -28,6 +28,22 @@ QUALITY_RE = re.compile(
 _BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def replace_colons(name: str, mode: str = "smart") -> str:
+    """Colons can't be in filenames; replace them the way Sonarr's "Colon Replacement"
+    setting does, so names match what Sonarr would write."""
+    if mode == "delete":
+        return name.replace(":", "")
+    if mode == "dash":
+        return name.replace(":", "-")
+    if mode == "space_dash":
+        return name.replace(":", " -")
+    if mode == "space_dash_space":
+        return re.sub(r"\s*:\s*", " - ", name)
+    # smart: "Up: Pups" → "Up - Pups", "10:30" → "10-30"
+    name = re.sub(r"\s*:\s+", " - ", name)
+    return name.replace(":", "-")
+
+
 def sanitize(name: str) -> str:
     name = _BAD.sub("", name).replace("  ", " ")
     return name.strip().rstrip(".")
@@ -55,11 +71,12 @@ class _EpNum:
 def episode_filename(series_name: str, eps: list[dict], ext: str, original: str,
                      settings: dict) -> str:
     q = QUALITY_RE.search(original)
+    colons = settings.get("colon_replacement", "smart")
     tokens = {
-        "series": series_name,
+        "series": replace_colons(series_name, colons),
         "season": eps[0]["season"],
         "episode": _EpNum([e["episode"] for e in eps], settings["multi_episode_style"]),
-        "title": " + ".join(e["title"] for e in eps),
+        "title": " + ".join(replace_colons(e["title"], colons) for e in eps),
         "quality": q.group(1) if q else "",
         "year": "",
     }
@@ -238,6 +255,26 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
 
         if f["status"] == "OK" and not ai and not manual:
             items.append({**base, "kind": "ok", "reason": "Correct"})
+            continue
+
+        expected = f.get("expected") or []
+        if codes == expected and not manual:
+            # Same episodes as the filename already says (e.g. the AI agreeing with it):
+            # nothing to fix. Title formatting alone is never a reason to rename.
+            items.append({**base, "kind": "ok", "reason": "Correct — the evidence agrees with the "
+                          "filename" + (" (AI)" if ai else "")})
+            continue
+        covered = sum(max(0.0, float(c[0].get("end", 0)) - float(c[0].get("start", 0))) for c in usable)
+        dur = float(f.get("duration") or 0)
+        if (expected and not manual and set(codes) < set(expected)
+                and (ai or (dur and covered < 0.75 * dur))):
+            # Evidence for only some of the filename's episodes, and nothing saying the
+            # rest isn't there: renaming would drop them from the name. Leave it alone.
+            missing = [c for c in expected if c not in codes]
+            items.append({**base, "kind": "review",
+                          "reason": f"{', '.join(codes)} confirmed{' by AI' if ai else ''}; no evidence "
+                                    f"either way for {', '.join(missing)} — left as named",
+                          "suggested": expected})
             continue
 
         missing_meta = [cd for cd in codes if cd not in eps]
