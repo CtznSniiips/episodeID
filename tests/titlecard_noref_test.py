@@ -101,3 +101,14 @@ for name, exp, dlg, conf, c1, c2 in (
     assert [c for c, *_ in got] == exp and f["status"] == "OK", (name, f["segments"])
     assert 650 <= got[0][2] <= 700, got  # split ~ where the second episode starts (745 - 48)
 print("PASS (single-segment files)")
+
+# S01E13E14 (log): dialogue for E13 ends at 12:23, nothing matched after; E14's card at 11:53
+# falls just inside E13's stretch (dialogue windows run into the next episode).
+EPS3 = [(1, 13, "Pups Save the Circus"), (1, 14, "Pup a Doodle Do")]
+idx = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in EPS + EPS2 + EPS3])
+refs.update({"S01E13": "x"})
+f, got = run(["S01E13", "S01E14"], 1395, [seg(0, 743, "S01E13", "high", .4)],
+             [("PUPS SAVE THE CIRCUS", 52), ("PUP DOODLE DO", 713)])
+print("S01E13E14", f["status"], got)
+assert [c for c, *_ in got] == ["S01E13", "S01E14"] and f["status"] == "OK" and got[1][2] == 1395, f["segments"]
+print("PASS (card inside the previous stretch)")

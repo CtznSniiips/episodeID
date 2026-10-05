@@ -304,7 +304,10 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
                 first = sg["title_card"]
                 lead = min(120.0, max(5.0, float(first["time"]) - float(sg["start"])))
                 cut = float(c["time"]) - lead
-                if first.get("code") == c["code"] or cut - sg["start"] < 240 or sg["end"] - cut < 120:
+                # The new episode runs to the next stretch of dialogue (or the end of the
+                # file) — including any unmatched stretch right after this one.
+                piece_end = segs[idx + 1]["start"] if idx + 1 < len(segs) else dur or sg["end"]
+                if first.get("code") == c["code"] or cut - sg["start"] < 240 or piece_end - cut < 120:
                     continue  # same title again, or too close to the first card to be another episode
                 # A second, different title inside one stretch of dialogue: the dialogue
                 # matched one episode across both (e.g. neither has a reference), so the
@@ -313,7 +316,7 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
                 o = originals.get(id(sg), sg)
                 piece = {k: v for k, v in o.items() if k not in (
                     "title_card", "dialogue_code", "evidence", "title_conflict", "why", "no_ref_for")}
-                piece.update(start=round(cut, 1), end=sg["end"])
+                piece.update(start=round(cut, 1), end=round(max(piece_end, sg["end"]), 1))
                 if o.get("no_ref_for"):
                     piece["no_ref_for"] = pos_expected or o["no_ref_for"]
                 sg["end"] = round(cut, 1)
