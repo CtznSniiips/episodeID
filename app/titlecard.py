@@ -139,6 +139,21 @@ def _hw_args(method: str) -> list[str]:
 
 # --------------------------------------------------------------- matching
 
+_ALPHA = {ch: i for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz0123456789")}
+
+
+def _ratio(a: str, b: str, floor: float) -> float:
+    """difflib similarity of a and b, or 0.0 when it can't reach `floor` (decided from
+    cheap upper bounds first — most titles are nowhere near)."""
+    if a == b:
+        return 1.0
+    m = difflib.SequenceMatcher(None, a, b)
+    if m.real_quick_ratio() < floor or m.quick_ratio() < floor:
+        return 0.0
+    r = m.ratio()
+    return r if r >= floor else 0.0
+
+
 def _ns(t: str) -> str:
     """Normalised title without spaces — OCR often drops them ("SAVETHE", "MIGHTYPUPS").
     Articles are kept: a card reading "THECAT" must still line up with "The Cat…"."""
@@ -170,7 +185,53 @@ class TitleIndex:
             for i, ns in enumerate(dict.fromkeys(f for f in forms if len(f) >= 2)):
                 self.titles.append({"code": code, "title": title, "ns": ns, "alias": i > 0})
 
+        self._build_counts()
+
+    def _build_counts(self) -> None:
+        """Letter counts per title (and per prefix), so cheap upper bounds on the
+        similarity to every title can be computed in one go."""
+        import numpy as np
+        n = len(self.titles)
+        self._L = np.array([len(t["ns"]) for t in self.titles] or [0], dtype=np.int32)[:n]
+        width = int(self._L.max()) + 1 if n else 1
+        cum = np.zeros((n, width, len(_ALPHA)), dtype=np.int16)
+        for i, t in enumerate(self.titles):
+            row = np.zeros(len(_ALPHA), dtype=np.int16)
+            for k, ch in enumerate(t["ns"], 1):
+                j = _ALPHA.get(ch)
+                if j is not None:
+                    row[j] += 1
+                cum[i, k] = row
+            cum[i, len(t["ns"]) + 1:] = row
+        self._cum = cum
+
+    def _bounds(self, c: str, idx, start, end):
+        """Upper bound on difflib's ratio between c and title[i][start_i:end_i]."""
+        import numpy as np
+        v = np.zeros(len(_ALPHA), dtype=np.int16)
+        for ch in c:
+            j = _ALPHA.get(ch)
+            if j is not None:
+                v[j] += 1
+        seg = self._cum[idx, end] - self._cum[idx, start]
+        inter = np.minimum(seg, v).sum(axis=1)
+        return 2.0 * inter / np.maximum(1, (end - start) + len(c))
+
     def read(self, text: str) -> dict | None:
+        """What this on-screen text says about the episode (see _read). The same text
+        turns up on many frames (a card stays up for seconds, credits repeat), so
+        results are remembered per text."""
+        c = _ns(text)
+        memo = self.__dict__.setdefault("_memo", {})
+        if c not in memo:
+            if len(memo) > 20000:
+                memo.clear()
+            r = self._read(text)
+            memo[c] = r and {k: v for k, v in r.items() if k != "text"}
+        r = memo[c]
+        return r and {**r, "text": text}
+
+    def _read(self, text: str) -> dict | None:
         """What this on-screen text says about the episode.
         A *full* read clearly matches one title. A *partial* read is the beginning of
         longer titles — a card still animating in ("PUPS SAVE RYDER'S" → "…Surprise"),
@@ -178,14 +239,45 @@ class TitleIndex:
         c = _ns(text)
         if len(c) < 3:
             return None
-        scored = sorted(((difflib.SequenceMatcher(None, c, t["ns"]).ratio(), i)
-                         for i, t in enumerate(self.titles)
-                         if abs(len(t["ns"]) - len(c)) <= max(4, len(t["ns"]) // 2)), reverse=True)
+        # Scores under 0.5 never decide anything (a match needs 0.78+, and a runner-up
+        # only matters within 0.25 of it), so those titles are skipped after a cheap
+        # upper-bound check instead of being scored in full.
+        import numpy as np
+        L, lc = self._L, len(c)
+        zero = np.zeros_like(L)
+        near = np.nonzero(np.abs(L - lc) <= np.maximum(4, L // 2))[0]
+        bound = self._bounds(c, near, zero[near], L[near])
+        order = np.argsort(-bound, kind="stable")
+        # Only the best title and the best one from another episode matter, and a runner-
+        # up more than 0.25 behind changes nothing: score in order of the upper bound and
+        # stop once no remaining title could change either.
+        scored, best, second = [], 0.0, 0.0
+        for k in order:
+            b = float(bound[k])
+            # Nothing counts below 0.78; once something does, a runner-up within 0.25 does.
+            if b < (max(0.5, best - 0.25) if best >= 0.78 else 0.78) or (scored and b <= second):
+                break
+            i = int(near[k])
+            r = _ratio(c, self.titles[i]["ns"], 0.5)
+            if not r:
+                continue
+            scored.append((r, i))
+            if r > best:
+                if scored and best:
+                    top_i = max(scored[:-1])[1]
+                    if self.titles[top_i]["code"] != self.titles[i]["code"]:
+                        second = max(second, best)
+                best = r
+            elif self.titles[i]["code"] != self.titles[max(scored)[1]]["code"]:
+                second = max(second, r)
+        scored.sort(reverse=True)
         # Titles this text could be the beginning of. Allow about one OCR slip per dozen
         # characters — "PUPS MAKETHE" must not count as the start of "Pups Save the…".
-        need_prefix = 1 - max(1, len(c) // 12) / len(c)
-        longer = [t for t in self.titles if len(t["ns"]) >= len(c) + 3
-                  and difflib.SequenceMatcher(None, c, t["ns"][:len(c)]).ratio() >= need_prefix]
+        need_prefix = 1 - max(1, lc // 12) / lc
+        cand = np.nonzero(L >= lc + 3)[0]
+        cand = cand[self._bounds(c, cand, zero[cand], zero[cand] + lc) >= need_prefix]
+        longer = [self.titles[i] for i in cand
+                  if _ratio(c, self.titles[i]["ns"][:lc], need_prefix) >= need_prefix]
         top = self.titles[scored[0][1]] if scored else None
         score = scored[0][0] if scored else 0.0
         second = next((sc for sc, i in scored[1:] if self.titles[i]["ns"] != top["ns"]
@@ -219,8 +311,10 @@ class TitleIndex:
             # The END of a title: the start is part of the logo artwork and isn't read
             # ("MIGHTY" in "Mighty Pups Versus the Dome" → card text "PUPS VS THE DOME").
             # Counts only when it's long enough and fits one episode.
-            tails = list(dict.fromkeys(t["code"] for t in self.titles if len(t["ns"]) >= len(c) + 3
-                                       and difflib.SequenceMatcher(None, c, t["ns"][-len(c):]).ratio() >= 0.92))
+            cand = np.nonzero(L >= lc + 3)[0]
+            cand = cand[self._bounds(c, cand, L[cand] - lc, L[cand]) >= 0.92]
+            tails = list(dict.fromkeys(self.titles[i]["code"] for i in cand
+                                       if _ratio(c, self.titles[i]["ns"][-lc:], 0.92) >= 0.92))
             if len(tails) == 1:
                 t = next(t for t in self.titles if t["code"] == tails[0])
                 return {"code": t["code"], "title": t["title"], "text": text,

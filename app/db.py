@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     params TEXT NOT NULL DEFAULT '{}',
     result TEXT
 );
+CREATE TABLE IF NOT EXISTS job_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    line TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS job_log_job ON job_log (job_id, id);
 """
 
 
@@ -234,16 +240,28 @@ def update_job(job_id: int, **fields) -> None:
 
 
 def append_job_log(job_id: int, line: str) -> None:
-    conn().execute("UPDATE jobs SET log = log || ? WHERE id=?", (line + "\n", job_id))
+    # One row per line: appending to a growing text column rewrote the whole log on
+    # every line, which got slow (and held up page loads) late in a long scan.
+    conn().execute("INSERT INTO job_log (job_id, line) VALUES (?,?)", (job_id, line))
 
 
 def get_job(job_id: int, tail: int | None = None) -> dict | None:
     r = conn().execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     job = _row(r, ("params", "result"))
-    if job and tail:
-        lines = job["log"].splitlines()
-        job["log_lines"] = len(lines)
-        job["log"] = "\n".join(lines[-tail:])
+    if not job:
+        return None
+    old = (job.get("log") or "").splitlines()  # jobs from before the log table
+    n_new = conn().execute("SELECT COUNT(*) FROM job_log WHERE job_id=?", (job_id,)).fetchone()[0]
+    if tail:
+        rows = conn().execute("SELECT line FROM job_log WHERE job_id=? ORDER BY id DESC LIMIT ?",
+                              (job_id, tail)).fetchall()
+        new = [r[0] for r in reversed(rows)]
+        lines = (old + new)[-tail:] if len(new) < tail else new
+        job["log_lines"] = len(old) + n_new
+    else:
+        lines = old + [r[0] for r in conn().execute(
+            "SELECT line FROM job_log WHERE job_id=? ORDER BY id", (job_id,)).fetchall()]
+    job["log"] = "\n".join(lines)
     return job
 
 

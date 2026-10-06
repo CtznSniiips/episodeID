@@ -90,6 +90,45 @@ class _EpNum:
         return f"{parts[0]}-E{parts[-1]}"   # prefixed_range (Sonarr default): S01E01-E02
 
 
+_MULTI_PART = re.compile(r"(?:\:?\s?(?:\(\d+\)|(Part|Pt\.?)\s?\d+))$", re.I)
+MAX_NAME_BYTES = 255
+
+
+def _episode_titles(eps: list[dict]) -> list[str]:
+    """Titles as Sonarr prepares them for {Episode Title} (GetEpisodeTitles)."""
+    raw = [(e.get("title") or "").rstrip(" .?") for e in eps]
+    if len(raw) == 1:
+        return raw
+    titles = list(dict.fromkeys(_MULTI_PART.sub("", t).strip() for t in raw))
+    if all(not t.strip() for t in titles):
+        titles = list(dict.fromkeys(raw))
+    return titles
+
+
+def _bytes(s: str) -> int:
+    return len(s.encode("utf-8"))
+
+
+def _truncate_bytes(s: str, n: int) -> str:
+    return s.encode("utf-8")[:max(0, n)].decode("utf-8", "ignore")
+
+
+def _episode_title(titles: list[str], max_len: int) -> str:
+    """Sonarr's GetEpisodeTitle: all titles joined with " + " if they fit, else
+    "first...last", else "first...", else the first title cut short."""
+    joined = " + ".join(titles)
+    if _bytes(joined) <= max_len:
+        return joined
+    first = titles[0]
+    if len(titles) >= 2 and _bytes(first) + _bytes(titles[-1]) + 3 <= max_len:
+        return f"{first.rstrip(' .')}...{titles[-1]}"
+    if len(titles) > 1 and _bytes(first) + 3 <= max_len:
+        return f"{first.rstrip(' .')}..."
+    if len(titles) == 1 and _bytes(first) <= max_len:
+        return first
+    return f"{_truncate_bytes(first, max_len - 3).rstrip(' .')}..."
+
+
 def episode_filename(series_name: str, eps: list[dict], ext: str, original: str,
                      settings: dict) -> str:
     q = QUALITY_RE.search(original)
@@ -97,18 +136,26 @@ def episode_filename(series_name: str, eps: list[dict], ext: str, original: str,
         "series": clean_token(series_name, settings),
         "season": eps[0]["season"],
         "episode": _EpNum([e["episode"] for e in eps], settings["multi_episode_style"]),
-        "title": " + ".join(clean_token(e["title"], settings) for e in eps),
+        "title": "",
         "quality": q.group(1) if q else "",
         "year": "",
     }
+    fmt = settings["naming_format"]
     try:
-        name = settings["naming_format"].format(**tokens)
+        without_title = fmt.format(**tokens)
     except (KeyError, ValueError, IndexError):
-        name = "{series} - S{season:02d}E{episode:02d} - {title}".format(**tokens)
-    name = re.sub(r"\s{2,}", " ", name).strip(" -")
-    if len(name) > 200:
-        name = name[:200].rstrip()
-    return sanitize(name) + ext
+        fmt = "{series} - S{season:02d}E{episode:02d} - {title}"
+        without_title = fmt.format(**tokens)
+    # As Sonarr: the title gets whatever is left of a 255-byte file name once the
+    # extension and the rest of the name are counted; it is measured before illegal
+    # characters are replaced.
+    max_len = MAX_NAME_BYTES - _bytes(ext) - _bytes(without_title)
+    tokens["title"] = clean_token(_episode_title(_episode_titles(eps), max_len), settings)
+    name = re.sub(r"\s{2,}", " ", fmt.format(**tokens)).strip(" -")
+    name = sanitize(name)
+    if _bytes(name) > MAX_NAME_BYTES - _bytes(ext):
+        name = _truncate_bytes(name, MAX_NAME_BYTES - _bytes(ext)).rstrip()
+    return name + ext
 
 
 def season_dir(root: Path, season: int, settings: dict, layout: dict) -> Path:
@@ -279,11 +326,12 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
             continue
 
         expected = f.get("expected") or []
-        if codes == expected and not manual:
+        if codes == expected:
             # Same episodes as the filename already says (e.g. the AI agreeing with it):
             # nothing to fix. Title formatting alone is never a reason to rename.
-            items.append({**base, "kind": "ok", "reason": "Correct — the evidence agrees with the "
-                          "filename" + (" (AI)" if ai else "")})
+            items.append({**base, "kind": "ok", "reason": (
+                "Correct — the episodes you set are the ones in the filename" if manual else
+                "Correct — the evidence agrees with the filename" + (" (AI)" if ai else ""))})
             continue
         covered = sum(max(0.0, float(c[0].get("end", 0)) - float(c[0].get("start", 0))) for c in usable)
         dur = float(f.get("duration") or 0)

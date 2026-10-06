@@ -311,7 +311,7 @@ async function startJob(kind, params = {}) {
 async function watchJobs() {
   clearInterval(pollTimer);
   const sid = state.series.id;
-  let lastId = null, wasActive = false;
+  let lastId = null, wasActive = false, lastSig = "", pinned = true, scrollPos = 0;
   const tick = async () => {
     if (!state.series || state.series.id !== sid) return clearInterval(pollTimer);
     const list = await api(`/api/jobs?series_id=${sid}`).catch(() => []);
@@ -321,6 +321,9 @@ async function watchJobs() {
     if (!j) { box.innerHTML = ""; return; }
     const active = j.status === "queued" || j.status === "running";
     const full = await api(`/api/jobs/${j.id}?tail=300`);
+    const sig = `${j.id}|${j.status}|${full.progress}|${full.message}|${full.log_lines}`;
+    if (sig === lastSig && box.firstChild) { schedule(active); return; }  // nothing new
+    lastSig = sig;
     const pct = Math.round((full.progress || 0) * 100);
     const badge = { done: "b-ok", failed: "b-bad", cancelled: "", running: "b-info", queued: "" }[j.status];
     box.innerHTML = `<div class="card job">
@@ -333,6 +336,9 @@ async function watchJobs() {
       <pre id="joblog">${full.log_lines > 300 ? `… ${full.log_lines - 300} earlier lines\n` : ""}${esc(full.log)}</pre></div>`;
     const pre = $("#joblog");
     pre.scrollTop = pre.scrollHeight;
+    pre.onscroll = () => { pinned = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20; };
+    if (!pinned) pre.scrollTop = scrollPos;
+    pre.addEventListener("scroll", () => { scrollPos = pre.scrollTop; });
     const c = $("#cancel-job");
     if (c) c.onclick = () => api(`/api/jobs/${j.id}/cancel`, { method: "POST" });
     const hb = $("#hide-job");
@@ -344,10 +350,15 @@ async function watchJobs() {
       return;
     }
     wasActive = active; lastId = j.id;
-    if (!active) clearInterval(pollTimer);
+    schedule(active);
+  };
+  // Poll again only after the previous poll finished: with a fixed timer, requests
+  // piled up whenever the server was busy, which made the page slower still.
+  const schedule = (active) => {
+    clearTimeout(pollTimer);
+    if (active && state.series && state.series.id === sid) pollTimer = setTimeout(tick, 1500);
   };
   await tick();
-  pollTimer = setInterval(tick, 1200);
 }
 
 function labelJob(kind) {
@@ -786,7 +797,7 @@ async function renderSettings() {
     ${test("sonarr")}</fieldset>
   <fieldset><legend>Naming</legend>
     ${f("naming_format", "Episode file name", "Tokens: {series} {season:02d} {episode:02d} {title} {quality}. {quality} is carried over from the old name (e.g. WEBDL-1080p).")}
-    ${cb("replace_illegal_characters", "Replace illegal characters", "As in Sonarr (Media Management): \\ / → +, ? → !, * → -, others removed. Off: all removed.")}
+    ${cb("replace_illegal_characters", "Replace illegal characters", "As in Sonarr (Media Management): \\ / → +, ? → ! (a ? ending a title is dropped), * → -, others removed. Off: all removed.")}
     ${sel("colon_replacement", "Colon replacement", [["smart", "Smart — \"Up: Pups\" → \"Up - Pups\" (Sonarr)"], ["delete", "Delete"], ["dash", "Replace with dash"], ["space_dash", "Replace with space dash"], ["space_dash_space", "Replace with space dash space"], ["custom", "Custom"]], "Match your Sonarr setting so names come out the same.")}
     ${f("colon_replacement_custom", "Custom colon replacement", "Only used when Colon replacement is Custom.")}
     ${sel("multi_episode_style", "Multi-episode style", [["prefixed_range", "Prefixed range — S01E01-E02 (Sonarr default)"], ["extend", "Extend — S01E01-02"], ["repeat", "Repeat — S01E01E02"]])}

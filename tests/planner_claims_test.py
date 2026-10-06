@@ -67,7 +67,7 @@ assert planner.replace_colons("At 10:30", "smart") == "At 10-30"
 assert planner.replace_colons("A: B", "delete") == "A B"
 # Other illegal characters, as Sonarr's FileNameBuilder.CleanFileName
 ct = planner.clean_token
-assert ct("Who's Afraid of the Big Bad Wolf?") == "Who's Afraid of the Big Bad Wolf!"
+assert ct("Who's Afraid? Not Me") == "Who's Afraid! Not Me"
 assert ct("AC/DC <Live> *Encore* \"Hits\" | B\\C") == "AC+DC Live -Encore- Hits  B+C"
 assert ct("What?", {"replace_illegal_characters": False}) == "What"
 assert ct("Part 1: The Start", {"colon_replacement": "custom", "colon_replacement_custom": " ~ "}) == "Part 1 ~  The Start"
@@ -96,4 +96,21 @@ assert by[F]["kind"] == "review" and not by[F]["selected"] and "S06E45" in by[F]
 # A Sonarr-named file is "correct" as named (colon → " - ").
 eps39 = [e for e in series["episodes"] if (e["season"], e["episode"]) == (6, 39)]
 assert planner.episode_filename("Paw Patrol", eps39, ".mkv", E, planner.get_settings()) == Path(E).name
+
+# Sonarr's multi-episode titles (S09E03-E07 file): too long for " + " → "first...last".
+st = dict(planner.get_settings(), multi_episode_style="repeat", colon_replacement="smart",
+          replace_illegal_characters=True)
+cat = [{"season": 9, "episode": n, "title": t} for n, t in (
+    (3, "Pups Meet the Cat Pack"), (4, "Cat Pack/PAW Patrol Rescue: Rocket Rescuers"),
+    (5, "Cat Pack/PAW Patrol Rescue: The Golden Lion Mask"), (6, "Cat Pack/PAW Patrol Rescue: The Cat Who Roared"),
+    (7, "Cat Pack/PAW Patrol Rescue: Saving the Safe"))]
+have = "Paw Patrol - S09E03E04E05E06E07 - Pups Meet the Cat Pack...Cat Pack+PAW Patrol Rescue - Saving the Safe WEBDL-1080p.mkv"
+got = planner.episode_filename("Paw Patrol", cat, ".mkv", have, st)
+print(" ", got); assert got == have, got
+# Two short titles still join with " + "; "(1)"/"(2)" parts collapse to one title.
+two = [{"season": 1, "episode": 1, "title": "The Quest (1)"}, {"season": 1, "episode": 2, "title": "The Quest (2)"}]
+assert planner.episode_filename("Show", two, ".mkv", "", dict(st, multi_episode_style="prefixed_range")) == \
+    "Show - S01E01-E02 - The Quest.mkv"
+assert planner.episode_filename("Show", [{"season": 1, "episode": 3, "title": "Who's Afraid?"}], ".mkv", "", st) == \
+    "Show - S01E03 - Who's Afraid.mkv"
 print("PASS")
