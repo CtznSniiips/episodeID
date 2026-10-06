@@ -234,9 +234,17 @@ class TitleIndex:
         # try single lines and runs of consecutive lines.
         cands = []
         for i in range(len(big)):
-            for j in range(i + 1, min(i + 5, len(big)) + 1):  # cards can span 4–5 lines
+            # A banner plus a wrapped title can take 6–7 lines ("BIG" / "TRUCK" / "PUPS" /
+            # "PUPS" / "STOP" / "A FLOOD").
+            for j in range(i + 1, min(i + 7, len(big)) + 1):
                 if max(l[2] for l in big[i:j]) >= MIN_TITLE_FRAC:
-                    cands.append(" ".join(l[0] for l in big[i:j]))
+                    words = " ".join(l[0] for l in big[i:j]).split()
+                    cands.append(" ".join(words))
+                    # A banner ending in the word the title starts with ("…TRUCK PUPS" /
+                    # "PUPS STOP A FLOOD"): also try with the repeat dropped.
+                    dedup = [w for k, w in enumerate(words) if k == 0 or w.lower() != words[k - 1].lower()]
+                    if len(dedup) < len(words):
+                        cands.append(" ".join(dedup))
         reads = [r for r in (self.read(c) for c in dict.fromkeys(cands)) if r]
         if not reads:
             return None

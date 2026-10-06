@@ -136,6 +136,17 @@ di = titlecard.TitleIndex([{"season": 1, "episode": 1, "title": "Rescue Wheels: 
                            {"season": 2, "episode": 1, "title": "Aqua Pups: Pups Save the Day"}])
 r = di.read("PUPS SAVE THE DAY"); assert r["partial"] and set(r["candidates"]) == {"S01E01", "S02E01"}, r
 
+# Banner over a wrapped title, six lines, the banner's last word repeated (S09E08).
+bt = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in EPS + [
+    (9, 8, "Big Truck Pups Stop a Flood"), (9, 15, "Big Truck Pups: Pups Save a Runaway Rig"),
+    (9, 16, "Big Truck Pups: Pups Stop the Big Bad Bot"), (9, 17, "Big Truck Pups: Pups Save a Big Bus"),
+    (9, 18, "Big Truck Pups: Pups Save the Giant Excavator"), (6, 3, "Pups Stop a Flood"[:0] + "Pups Stop the Ruff-Ruff Pack")]])
+flood = [["BIG", .98, .042, .10], ["TRUCK", .948, .075, .15], ["PUPS", .971, .047, .21],
+         ["PUPS", .977, .136, .35], ["STOP", .99, .128, .5], ["A FLOOD", .934, .131, .65],
+         ["Written by", .956, .047, .8], ["Andy Guerdat& Steve Sullivan", .969, .047, .86]]
+r = bt.match_frame(flood); assert r and not r["partial"] and r["code"] == "S09E08", r
+print("  'BIG / TRUCK / PUPS / PUPS / STOP / A FLOOD' → S09E08")
+
 print("End to end — animated cards:")
 FONT = next(p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",) if Path(p).exists())
 
