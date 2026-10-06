@@ -144,6 +144,7 @@ def _ns(t: str) -> str:
     Articles are kept: a card reading "THECAT" must still line up with "The Cat…"."""
     t = html.unescape(t or "").lower()
     t = re.sub(r"\(\d+\)$", "", t.strip())
+    t = re.sub(r"\bversus\b", "vs", t)  # "Mighty Pups Versus the Dome" / card "PUPS VS THE DOME"
     return re.sub(r"[^a-z0-9]+", "", t)
 
 
@@ -214,6 +215,16 @@ class TitleIndex:
         if full and not longer:
             return {"code": top["code"], "title": top["title"], "text": text,
                     "score": round(score, 3), "partial": False}
+        if not full and not longer and len(c) >= 10:
+            # The END of a title: the start is part of the logo artwork and isn't read
+            # ("MIGHTY" in "Mighty Pups Versus the Dome" → card text "PUPS VS THE DOME").
+            # Counts only when it's long enough and fits one episode.
+            tails = list(dict.fromkeys(t["code"] for t in self.titles if len(t["ns"]) >= len(c) + 3
+                                       and difflib.SequenceMatcher(None, c, t["ns"][-len(c):]).ratio() >= 0.92))
+            if len(tails) == 1:
+                t = next(t for t in self.titles if t["code"] == tails[0])
+                return {"code": t["code"], "title": t["title"], "text": text,
+                        "score": round(score, 3), "partial": False, "tail": True}
         if longer and len(c) >= 6 and len(longer) <= 25:
             cands = ([top["code"]] if full else []) + [t["code"] for t in longer]
             return {"code": top["code"] if full else None, "title": top["title"] if full else None,

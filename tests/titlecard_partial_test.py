@@ -147,6 +147,20 @@ flood = [["BIG", .98, .042, .10], ["TRUCK", .948, .075, .15], ["PUPS", .971, .04
 r = bt.match_frame(flood); assert r and not r["partial"] and r["code"] == "S09E08", r
 print("  'BIG / TRUCK / PUPS / PUPS / STOP / A FLOOD' → S09E08")
 
+# The start of the title is logo artwork and "Versus" is written "VS" (S06E45).
+mp = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in EPS + [
+    (6, 39, "Mighty Pups, Charged Up: Pups vs. the Copycat"),
+    (6, 44, "Mighty Pups, Charged Up: Pups Stop a Big Bad Bot"),
+    (6, 45, "Mighty Pups, Charged Up: Mighty Pups Versus the Dome"),
+    (0, 18, "Mighty Pups, Charged Up: Mighty Pups vs. the Mighty Cheetah"),
+    (0, 19, "Charged Up: Mighty Pups Stop the Mighty Queen")]], include_specials=True)
+dome = [["CHARGED", .917, .103, .2], ["UP", .994, .047, .27], ["PUPS", .994, .169, .4],
+        ["VS", .911, .086, .55], ["THEDOME", .992, .133, .65], ["Written by Al Schwartz", .955, .047, .85]]
+r = mp.match_frame(dome); assert r and not r["partial"] and r["code"] == "S06E45", r
+assert mp.match_frame(dome[:1] + dome[2:])["code"] == "S06E45"  # without the "UP" line
+r = mp.read("THE COPYCAT"); assert not r or r["partial"] or r["code"] == "S06E39", r
+print("  'CHARGED UP / PUPS / VS / THEDOME' → S06E45")
+
 print("End to end — animated cards:")
 FONT = next(p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",) if Path(p).exists())
 
