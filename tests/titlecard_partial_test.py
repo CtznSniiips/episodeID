@@ -103,6 +103,18 @@ assert titlecard._reuse_cached({"complete": True, "frames": [{"t": 1.0, "lines":
 assert titlecard._reuse_cached({"complete": True, "frames": [{"t": 1.0, "lines": L("MIGHTYPUPS STOPTHE HICCUPS")}]}, idx, 1.0) is not None
 print("  cached OCR: early-stopped old scans re-read, covering scans reused")
 
+# An exact read wins against a title only two letters longer (S06E31 on the full PAW
+# Patrol list: "Pups Save the Bears" vs "Pups Save the Beavers").
+bi = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in
+                           EPS + [(6, 31, "Pups Save the Bears"), (2, 9, "Pups Save the Beavers"), (2, 1, "Pups Save the Bees")]])
+r = bi.match_frame([["PUPS", .986, .197, .3], ["SAVETHE", .99, .117, .46], ["BEARS", .982, .2, .63],
+                    ["Written by Clark Stubbs", .978, .058, .82]])
+assert r and not r["partial"] and r["code"] == "S06E31", r
+assert bi.read("PUPS SAVETHE BEAVERS")["code"] == "S02E09"
+r = bi.read("PUPS SAVETHE BEAERS")  # an OCR slip between the two: not decided by itself
+assert not r or r["partial"] or r["code"] == "S06E31", r
+print("  exact 'PUPS SAVETHE BEARS' → S06E31 despite 'Pups Save the Beavers'")
+
 print("End to end — animated cards:")
 FONT = next(p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",) if Path(p).exists())
 

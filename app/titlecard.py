@@ -177,7 +177,11 @@ class TitleIndex:
         second = next((sc for sc, i in scored[1:] if self.titles[i]["ns"] != top["ns"]), 0.0) \
             if top else 0.0
         need = 0.9 if top and len(top["ns"]) <= 8 else 0.85
-        full = top is not None and score >= need and score - second >= 0.06
+        # Clearly one title: well ahead of the next. An exact (or near-exact) read only
+        # needs a smaller lead — "PUPS SAVE THE BEARS" is exactly "Pups Save the Bears",
+        # even though "Pups Save the Beavers" is only two letters longer.
+        full = top is not None and score >= need and (
+            score - second >= 0.06 or (score >= 0.97 and score - second >= 0.03))
         if full:
             # The matched title is itself how other titles begin ("Mighty Pups" →
             # "Mighty Pups Stop the…"): a banner, or a card still animating in — even if
