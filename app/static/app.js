@@ -37,7 +37,7 @@ function modal(html) {
   $("#modal").classList.remove("hidden");
   return $("#modal-box");
 }
-function closeModal() { $("#modal").classList.add("hidden"); $("#modal-box").innerHTML = ""; }
+function closeModal() { $("#modal").classList.add("hidden"); $("#modal-box").innerHTML = ""; $("#modal-box").style.width = ""; }
 $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
 
 const fmtTime = (s) => {
@@ -439,6 +439,7 @@ async function tabPlan(reload = true) {
     };
   }
   $$("button.set-ep", tab).forEach((b) => b.onclick = () => setEpisodeDialog(b.dataset.src, b.dataset.cur));
+  $$("button.card-check", tab).forEach((b) => b.onclick = () => cardCheckDialog(b.dataset.src));
   $$("button.clear-ov", tab).forEach((b) => b.onclick = async () => {
     await api(`/api/series/${state.series.id}/overrides`, { method: "POST",
       body: { source: b.dataset.src, codes: null } }).catch(fail);
@@ -468,8 +469,62 @@ function rowHtml(it, eps, applied) {
       <div class="muted small">${esc(it.reason || "")}</div></td>
     <td>${segs}${src}</td>
     <td>${applied ? "" : `<button class="btn small set-ep" data-src="${esc(it.source)}" data-cur="${esc(cur)}">Set episode…</button>
-      ${ovr ? `<button class="btn small clear-ov" data-src="${esc(it.source)}">Clear</button>` : ""}`}</td>
+      ${ovr ? `<button class="btn small clear-ov" data-src="${esc(it.source)}">Clear</button>` : ""}`}
+      <button class="btn small card-check" data-src="${esc(it.source)}" style="margin-top:4px" title="See what the title-card OCR reads in part of this file">Check title cards…</button></td>
   </tr>`;
+}
+
+function parseTime(v) {
+  const p = String(v).trim().split(":").map(Number);
+  if (p.some(isNaN)) return NaN;
+  return p.reduce((a, x) => a * 60 + x, 0);
+}
+
+function cardCheckDialog(source) {
+  const box = modal(`<h2 style="margin-top:0">Check title cards</h2>
+    <div class="path">${esc(source)}</div>
+    <p class="muted small">Reads every sampled frame in the range (up to 3 minutes) and shows the OCR text and
+      what it matched — nothing is cached or skipped. Try both decoders if a card is being missed.</p>
+    <div class="row">
+      <label class="small">From <input id="cc-a" value="0:00" size="6"></label>
+      <label class="small">to <input id="cc-b" value="1:30" size="6"></label>
+      <label class="small">Decode <select id="cc-d"><option value="auto">as the scan does</option><option value="cpu">CPU</option></select></label>
+      <label class="small">Frames <select id="cc-m"><option value="full">all (1 per second)</option><option value="key">keyframes only</option></select></label>
+      <div class="spacer"></div><button class="btn primary" id="cc-go">Read</button></div>
+    <div id="cc-out" style="margin-top:12px"></div>
+    <div class="row" style="margin-top:12px"><button class="btn" id="cc-copy" disabled>Copy as text</button>
+      <div class="spacer"></div><button class="btn" id="c">Close</button></div>`);
+  $("#modal-box").style.width = "min(960px, 100%)";
+  let text = "";
+  $("#c", box).onclick = closeModal;
+  $("#cc-copy", box).onclick = async () => {
+    try { await navigator.clipboard.writeText(text); toast("Copied"); }
+    catch { const t = document.createElement("textarea"); t.value = text; document.body.append(t); t.select(); document.execCommand("copy"); t.remove(); toast("Copied"); }
+  };
+  $("#cc-go", box).onclick = async () => {
+    const start = parseTime($("#cc-a", box).value), end = parseTime($("#cc-b", box).value);
+    if (isNaN(start) || isNaN(end) || end <= start) return toast("Enter times like 0:30 and 1:30");
+    const out = $("#cc-out", box);
+    out.innerHTML = '<span class="muted small">Reading… (about a second per frame)</span>';
+    $("#cc-go", box).disabled = true;
+    try {
+      const r = await api(`/api/series/${state.series.id}/titlecard-check`, { method: "POST",
+        body: { source, start, end, decode: $("#cc-d", box).value, mode: $("#cc-m", box).value } });
+      const hitTxt = (h) => !h ? "" : h.partial ? `partial → ${(h.candidates || []).slice(0, 4).join(", ")}` : `→ ${h.code} ${h.title}`;
+      const lineTxt = (l) => `${l[0]} (conf ${l[1]}, height ${l[2]})`;
+      text = `EpisodeID title card check — ${source}\nrange ${fmtTime(start)}–${fmtTime(end)}, decode ${r.decode}, ${r.mode} frames, ${r.fps} fps` +
+        ` (counts: conf ≥ ${r.min_conf}, line height ≥ ${r.min_line}, a title needs one line ≥ ${r.min_title_line})\n` +
+        r.frames.map((f) => `${fmtTime(f.t)}  ${f.size.join("x")}  ${f.lines.map(lineTxt).join(" | ") || "—"}  ${hitTxt(f.hit)}`).join("\n");
+      out.innerHTML = `<div class="small muted">Decoded on ${esc(r.decode.toUpperCase())}, ${r.frames.length} frames.</div>
+        <div style="max-height:50vh;overflow:auto"><table><tr><th>Time</th><th>Text read (confidence, height)</th><th>Match</th></tr>
+        ${r.frames.map((f) => `<tr><td class="mono">${fmtTime(f.t)}</td>
+          <td class="small">${f.lines.map((l) => `${esc(l[0])} <span class="muted">(${l[1]}, ${l[2]})</span>`).join("<br>") || '<span class="muted">—</span>'}</td>
+          <td class="small">${f.hit ? `<span class="badge ${f.hit.partial ? "b-warn" : "b-ok"}">${esc(f.hit.partial ? "partial" : f.hit.code)}</span> ${esc(f.hit.partial ? (f.hit.candidates || []).slice(0, 4).join(", ") : f.hit.title)}` : ""}</td></tr>`).join("")}
+        </table></div>`;
+      $("#cc-copy", box).disabled = false;
+    } catch (e) { out.innerHTML = `<span class="badge b-bad">Failed</span> ${esc(e.message)}`; }
+    $("#cc-go", box).disabled = false;
+  };
 }
 
 function setEpisodeDialog(source, current) {

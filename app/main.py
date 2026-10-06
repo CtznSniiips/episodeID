@@ -435,6 +435,38 @@ class JobReq(BaseModel):
     params: dict = {}
 
 
+class CardCheckReq(BaseModel):
+    source: str
+    start: float = 0
+    end: float = 90
+    decode: str = "auto"   # auto | cpu
+    mode: str = "full"     # full | key
+
+
+@app.post("/api/series/{sid}/titlecard-check")
+def titlecard_check(sid: int, body: CardCheckReq):
+    """Diagnostics for one file: what the title-card OCR reads, frame by frame."""
+    series = db.get_series(sid) or _404()
+    if not titlecard.available():
+        raise HTTPException(400, "The OCR engine isn't installed in this image")
+    root = Path(series["path"])
+    try:
+        video = safe_media_path(root / body.source)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not root.resolve() in video.parents or not video.is_file():
+        raise HTTPException(404, "File not found")
+    start = max(0.0, float(body.start))
+    length = min(180.0, max(1.0, float(body.end) - start))
+    opts = series.get("options") or {}
+    index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")))
+    try:
+        return titlecard.inspect(video, start, length, index, "cpu" if body.decode == "cpu" else "auto",
+                                 "key" if body.mode == "key" else "full")
+    except titlecard.TitleCardUnavailable as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/series/{sid}/jobs")
 def start_job(sid: int, body: JobReq):
     db.get_series(sid) or _404()

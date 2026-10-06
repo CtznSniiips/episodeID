@@ -221,14 +221,14 @@ class TitleIndex:
 # --------------------------------------------------------------- sampling
 
 def _sample(video: Path, start: float, length: float, fps: float,
-            mode: str = "full") -> list[tuple[float, "object"]]:
+            mode: str = "full", method: str | None = None) -> list[tuple[float, "object"]]:
     """Frames at `fps` from [start, start+length].
     mode "key":  decode keyframes only — ~8x faster; title cards almost always begin
                  on a cut, where encoders place a keyframe.
     mode "full": decode everything except B-frames (same frames out, ~1/3 less work)."""
     import cv2
     skip = ["-skip_frame", "nokey"] if mode == "key" else ["-skip_frame", "bidir"]
-    method = decode_method()
+    method = method or decode_method()
     for attempt_method in ([method, "cpu"] if method != "cpu" else ["cpu"]):
         tmp = Path(tempfile.mkdtemp(prefix="tc_", dir=str(CACHE_DIR)))
         try:
@@ -375,6 +375,27 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
     cache.write_text(json.dumps({"complete": complete, "stopped_at": stopped_at, "ocr": OCR_SIG,
                                  "frames": [{"t": f["t"], "lines": f["lines"]} for f in frames]}))
     return frames
+
+
+def inspect(video: Path, start: float, length: float, index: TitleIndex,
+            decode: str = "auto", mode: str = "full", fps: float | None = None) -> dict:
+    """Diagnostics: OCR every sampled frame of a window (no cache, no skipping) and
+    show what each matched. decode: "auto" (as the scan does) or "cpu"."""
+    fps = float(fps or get_settings()["titlecard_fps"])
+    method = "cpu" if decode == "cpu" else decode_method()
+    before = _accel.get("decode")
+    raw = _sample(video, start, length, fps, mode, method)
+    used = _accel.get("decode") or method
+    if decode == "cpu" and before:
+        _accel["decode"] = before  # a diagnostic run doesn't change what the scan reports
+    out = []
+    for t, img in raw:
+        lines = _ocr_frame(img)
+        hit = index.match_frame(lines)
+        out.append({"t": t, "lines": lines, "size": [int(img.shape[1]), int(img.shape[0])],
+                    "hit": hit and {k: hit.get(k) for k in ("code", "title", "text", "partial", "candidates")}})
+    return {"decode": used, "mode": mode, "fps": fps, "frames": out,
+            "min_conf": MIN_CONF, "min_line": MIN_BOX_FRAC, "min_title_line": MIN_TITLE_FRAC}
 
 
 def cards_from_frames(frames: list[dict]) -> list[dict]:
