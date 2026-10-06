@@ -92,11 +92,15 @@ L = lambda txt: [[txt, 0.95, 0.08, 0.4]]
 partial_frames = [{"t": 20.0 + i, "lines": L("PUPS SAVETHE BABY")} for i in range(7)]
 old = {"complete": False, "frames": partial_frames}            # old rule: stopped 6 s after a hit
 assert titlecard._reuse_cached(dict(old), idx, 1.0) is None, "early-stopped old cache must be re-read"
-ok = {"complete": False, "stopped_at": 33.0, "frames": [{"t": 20.0 + i, "lines": L("PUPS SAVETHE BABY")} for i in range(13)]}
+ok = {"complete": False, "stopped_at": 33.0, "ocr": titlecard.OCR_SIG, "frames": [{"t": 20.0 + i, "lines": L("PUPS SAVETHE BABY")} for i in range(13)]}
 assert titlecard._reuse_cached(ok, idx, 1.0) is not None, "cache that covers the settle time is reused"
 gone = {"complete": False, "stopped_at": 27.0, "frames": [{"t": 20.0, "lines": L("XQZW")}]}
 assert titlecard._reuse_cached(gone, idx, 1.0) is None, "cache stopped on a no-longer-matching frame is re-read"
-assert titlecard._reuse_cached({"complete": True, "frames": [{"t": 1.0, "lines": []}]}, idx, 1.0) is not None
+assert titlecard._reuse_cached({"complete": True, "ocr": titlecard.OCR_SIG, "frames": [{"t": 1.0, "lines": []}]}, idx, 1.0) is not None
+# Read by an older OCR version: windows that found no complete title are read again…
+assert titlecard._reuse_cached({"complete": True, "frames": [{"t": 1.0, "lines": []}]}, idx, 1.0) is None
+# …but a window that already found its title is kept.
+assert titlecard._reuse_cached({"complete": True, "frames": [{"t": 1.0, "lines": L("MIGHTYPUPS STOPTHE HICCUPS")}]}, idx, 1.0) is not None
 print("  cached OCR: early-stopped old scans re-read, covering scans reused")
 
 print("End to end — animated cards:")

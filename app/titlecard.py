@@ -38,6 +38,9 @@ FRAME_H = 360           # …and roughly this height (16:9)
 MIN_BOX_FRAC = 0.035    # lines this tall (fraction of frame height) can be part of a title…
 MIN_TITLE_FRAC = 0.045  # …but every read needs at least one line this tall (ignores small signs)
 MIN_CONF = 0.75         # OCR confidence for a line to be considered
+# Identifies how cached OCR was produced (engine settings, frame size). Cached windows
+# from other settings that found no complete title are read again.
+OCR_SIG = f"rapidocr-1|{FRAME_W}x{FRAME_H}|det-min-{FRAME_H}"
 CARD_SETTLE = 6         # keep reading this many seconds after a card first appears…
 CARD_SETTLE_PARTIAL = 12  # …or this long if only part of a title has been read so far
 
@@ -320,6 +323,8 @@ def _reuse_cached(data: dict, index: TitleIndex, fps: float) -> list[dict] | Non
     frames = data["frames"]
     for fr in frames:
         fr["hit"] = index.match_frame(fr["lines"])
+    if data.get("ocr") != OCR_SIG and not any(fr["hit"] and not fr["hit"]["partial"] for fr in frames):
+        return None  # read by an older version that found no title here: read it again
     if data.get("complete", True):
         return frames
     first, full_seen = None, False
@@ -367,7 +372,7 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
             first_hit_t = t if first_hit_t is None else first_hit_t
             full_seen = full_seen or not hit["partial"]
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"complete": complete, "stopped_at": stopped_at,
+    cache.write_text(json.dumps({"complete": complete, "stopped_at": stopped_at, "ocr": OCR_SIG,
                                  "frames": [{"t": f["t"], "lines": f["lines"]} for f in frames]}))
     return frames
 
