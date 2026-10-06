@@ -17,6 +17,7 @@ requires re-reading video.
 from __future__ import annotations
 
 import difflib
+import html
 import hashlib
 import json
 import re
@@ -139,8 +140,11 @@ def _hw_args(method: str) -> list[str]:
 # --------------------------------------------------------------- matching
 
 def _ns(t: str) -> str:
-    """Normalised title without spaces — OCR often drops them ("SAVETHE", "MIGHTYPUPS")."""
-    return norm_title(t).replace(" ", "")
+    """Normalised title without spaces — OCR often drops them ("SAVETHE", "MIGHTYPUPS").
+    Articles are kept: a card reading "THECAT" must still line up with "The Cat…"."""
+    t = html.unescape(t or "").lower()
+    t = re.sub(r"\(\d+\)$", "", t.strip())
+    return re.sub(r"[^a-z0-9]+", "", t)
 
 
 class TitleIndex:
@@ -151,10 +155,19 @@ class TitleIndex:
         for e in episodes:
             if e["season"] == 0 and not include_specials:
                 continue
-            n = norm_title(e.get("title") or "")
-            if len(n) >= 2 and not re.fullmatch(r"episode \d+", n):
-                self.titles.append({"code": f"S{e['season']:02d}E{e['episode']:02d}",
-                                    "title": e["title"], "ns": n.replace(" ", "")})
+            title = e.get("title") or ""
+            n = norm_title(title)
+            if len(n) < 2 or re.fullmatch(r"episode \d+", n):
+                continue
+            code = f"S{e['season']:02d}E{e['episode']:02d}"
+            forms = [_ns(title), n.replace(" ", "")]  # with and without a leading "The"/"A"
+            # "Cat Pack/PAW Patrol Rescue: Saving the Safe" — cards often show the banner
+            # small, shortened or not at all, so the part after the colon also counts.
+            if ":" in title:
+                sub = title.rsplit(":", 1)[1]
+                forms += [f for f in (_ns(sub), norm_title(sub).replace(" ", "")) if len(f) >= 6]
+            for i, ns in enumerate(dict.fromkeys(f for f in forms if len(f) >= 2)):
+                self.titles.append({"code": code, "title": title, "ns": ns, "alias": i > 0})
 
     def read(self, text: str) -> dict | None:
         """What this on-screen text says about the episode.
@@ -174,14 +187,24 @@ class TitleIndex:
                   and difflib.SequenceMatcher(None, c, t["ns"][:len(c)]).ratio() >= need_prefix]
         top = self.titles[scored[0][1]] if scored else None
         score = scored[0][0] if scored else 0.0
-        second = next((sc for sc, i in scored[1:] if self.titles[i]["ns"] != top["ns"]), 0.0) \
-            if top else 0.0
+        second = next((sc for sc, i in scored[1:] if self.titles[i]["ns"] != top["ns"]
+                       and self.titles[i]["code"] != top["code"]), 0.0) if top else 0.0
         need = 0.9 if top and len(top["ns"]) <= 8 else 0.85
         # Clearly one title: well ahead of the next. An exact (or near-exact) read only
         # needs a smaller lead — "PUPS SAVE THE BEARS" is exactly "Pups Save the Bears",
-        # even though "Pups Save the Beavers" is only two letters longer.
-        full = top is not None and score >= need and (
-            score - second >= 0.06 or (score >= 0.97 and score - second >= 0.03))
+        # even though "Pups Save the Beavers" is only two letters longer. A longer read a
+        # little short of the bar still counts when nothing else comes close (the card
+        # says "The Cat That Roared", TVDB "The Cat Who Roared").
+        full = top is not None and (
+            (score >= need and (score - second >= 0.06 or (score >= 0.97 and score - second >= 0.03)))
+            or (score >= 0.78 and len(c) >= 12 and score - second >= 0.25))
+        twins = [t["code"] for t in self.titles if top and t["ns"] == top["ns"]
+                 and t["code"] != top["code"]] if full else []
+        if twins:
+            # Several episodes share this text (e.g. the same subtitle under different
+            # banners): it only narrows things down; the filename or dialogue decides.
+            return {"code": None, "title": None, "text": text, "score": round(score, 3),
+                    "partial": True, "candidates": list(dict.fromkeys([top["code"]] + twins))}
         if full:
             # The matched title is itself how other titles begin ("Mighty Pups" →
             # "Mighty Pups Stop the…"): a banner, or a card still animating in — even if

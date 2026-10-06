@@ -270,7 +270,13 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
             if code:
                 usable.append((code, c))
         for i, (code, c) in enumerate(usable):
-            start = 0.0 if i == 0 else max(segs[-1]["start"] + 60, c["time"] - 5)
+            if i == 0:
+                # Starts the file — unless the filename puts an earlier episode before it
+                # (whose card wasn't read): then it starts around its card.
+                later = code in expected and expected.index(code) > 0
+                start = max(0.0, c["time"] - 60) if later else 0.0
+            else:
+                start = max(segs[-1]["start"] + 60, c["time"] - 5)
             if segs:
                 segs[-1]["end"] = max(segs[-1]["start"] + 30, c["time"] - 90)
             segs.append({"start": round(start, 1), "end": round(dur, 1), "code": code,

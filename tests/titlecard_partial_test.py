@@ -115,6 +115,27 @@ r = bi.read("PUPS SAVETHE BEAERS")  # an OCR slip between the two: not decided b
 assert not r or r["partial"] or r["code"] == "S06E31", r
 print("  exact 'PUPS SAVETHE BEARS' → S06E31 despite 'Pups Save the Beavers'")
 
+# Banner + subtitle titles (S09E06E07): the card shows "CAT PACK" small and the
+# subtitle big; "PAW Patrol Rescue" isn't on screen. And a card worded differently
+# from TVDB ("The Cat That Roared" vs "The Cat Who Roared") nothing else comes close to.
+ci = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in EPS + [
+    (9, 4, "Cat Pack/PAW Patrol Rescue: Cat Pack Meets the PAW Patrol"),
+    (9, 5, "Cat Pack/PAW Patrol Rescue: The Golden Lion Mask"),
+    (9, 6, "Cat Pack/PAW Patrol Rescue: The Cat Who Roared"),
+    (9, 7, "Cat Pack/PAW Patrol Rescue: Saving the Safe"),
+    (6, 31, "Pups Save the Bears"), (2, 9, "Pups Save the Beavers")]])
+safe = [["CATPACK", .851, .097, .2], ["SAVING", .985, .153, .4], ["THE", .994, .164, .55],
+        ["SAFE", .995, .192, .7], ["Written by Michael Stokes", .959, .056, .85]]
+r = ci.match_frame(safe); assert r and not r["partial"] and r["code"] == "S09E07", r
+roar = [["CATTAEK", .908, .089, .2], ["THECAT", .993, .136, .35], ["THAT", .996, .119, .5],
+        ["ROARED", .991, .144, .65], ["Written byMichael Stokes", .965, .047, .85]]
+r = ci.match_frame(roar); assert r and not r["partial"] and r["code"] == "S09E06", r
+print("  'CAT PACK / SAVING THE SAFE' → S09E07, 'CAT PACK / THE CAT THAT ROARED' → S09E06")
+# Same subtitle under two banners → only candidates, never a pick by itself.
+di = titlecard.TitleIndex([{"season": 1, "episode": 1, "title": "Rescue Wheels: Pups Save the Day"},
+                           {"season": 2, "episode": 1, "title": "Aqua Pups: Pups Save the Day"}])
+r = di.read("PUPS SAVE THE DAY"); assert r["partial"] and set(r["candidates"]) == {"S01E01", "S02E01"}, r
+
 print("End to end — animated cards:")
 FONT = next(p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",) if Path(p).exists())
 

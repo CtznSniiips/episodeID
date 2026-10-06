@@ -139,3 +139,12 @@ for name, exp, dsegs, cards in (
     else:
         assert f["status"] == "LOW_CONFIDENCE" and f["segments"][1]["code"] != "S10E26", f["segments"]
 print("PASS (card in the opening gap)")
+
+# S09E06E07 (Whisper, no dialogue match): only the second card was read. Its episode
+# starts around its card, not at 0:00.
+f = {"expected": ["S09E06", "S09E07"], "duration": 1341, "text_source": "whisper small", "segments": []}
+pipeline._apply_title_cards(f, [{"code": "S09E07", "title": "x", "text": "SAVING THE SAFE", "score": 1.0,
+                                 "partial": False, "time": 678.0}])
+print("S09E06E07 (one card, no dialogue):", f["status"], [(s["code"], s["start"], s["end"]) for s in f["segments"]])
+assert f["segments"][0]["start"] > 600 and f["status"] == "LOW_CONFIDENCE", f
+print("PASS (later card without dialogue)")
