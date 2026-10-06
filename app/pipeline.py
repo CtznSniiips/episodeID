@@ -191,6 +191,16 @@ def _fmt_t(t: float) -> str:
     return f"{int(t // 60)}:{int(t % 60):02d}"
 
 
+def _merge_windows(ws: list) -> list:
+    out: list = []
+    for a, b in sorted(ws):
+        if out and a <= out[-1][1] + 5:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
 def _discount_unreferenced(segs: list[dict], expected: list[str], duration: float,
                            refs: dict) -> None:
     """Dialogue matched to an episode other than the filename's only counts against
@@ -407,7 +417,9 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
         # just no evidence for the rest (no reference, card not found). Leave it alone.
         missing = [c for c in expected if c not in detected]
         f["status"], f["hold"] = "LOW_CONFIDENCE", True
-        notes.append(f"no evidence either way for {', '.join(missing)} — left as named")
+        where = ", ".join(f"{_fmt_t(a)}–{_fmt_t(b)}" for a, b in f.get("title_scan") or [])
+        notes.append(f"no evidence either way for {', '.join(missing)} — left as named"
+                     + (f" (no title card read for it; looked at {where})" if where else ""))
     if notes and f["status"] != "LOW_CONFIDENCE":
         note = "; ".join(notes)
     elif notes and f["status"] == "LOW_CONFIDENCE" and not note.startswith("At least"):
@@ -452,8 +464,11 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     hit_times: list[float] = []
 
     def run(f: dict, learned) -> list[dict]:
+        searched: list = []
         cards = titlecard.detect(root / f["rel"], float(f.get("duration") or 0), f["segments"],
-                                 index, learned, runtime, ctx, force, len(f.get("expected") or []))
+                                 index, learned, runtime, ctx, force, len(f.get("expected") or []),
+                                 searched)
+        f["title_scan"] = _merge_windows(searched)
         for c in cards:
             starts = titlecard.episode_starts(float(f.get("duration") or 0), f["segments"], runtime,
                                               len(f.get("expected") or []))
@@ -469,12 +484,19 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         return [max(0.0, round(med - 40)), round(med + 60)]
 
     def report(f, cards, notes):
+        full = {c.get("code") for c in cards if not c.get("partial")}
+        looked = ", ".join(f"{_fmt_t(a)}–{_fmt_t(b)}" for a, b in f.get("title_scan") or [])
+        short = len(full) < len(f.get("expected") or [1])
+        where = f" (looked at {looked})" if looked and short and not any(
+            "looked at" in n for n in notes) else ""
         if cards:
             desc = ", ".join(
                 f"'{c['text']}' @{_fmt_t(c['time'])} → " + (c["code"] if not c.get("partial") else
                 f"partial read, could be {', '.join((c.get('candidates') or [])[:4])}"
                 + ("…" if len(c.get("candidates") or []) > 4 else "")) for c in cards)
-            ctx.log(f"  title card {f['rel']}: {desc}" + (f" — {'; '.join(notes)}" if notes else ""))
+            ctx.log(f"  title card {f['rel']}: {desc}{where}" + (f" — {'; '.join(notes)}" if notes else ""))
+        elif looked:
+            ctx.log(f"  title card {f['rel']}: none read (looked at {looked})")
 
     if mode == "auto" and "has_cards" not in status:
         pool = [f for f in files if f["status"] == "OK"][:6]

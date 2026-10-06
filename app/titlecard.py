@@ -425,25 +425,36 @@ def episode_starts(duration: float, segments: list[dict],
 
 def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex,
            learned_window: list | None = None, runtime_min: float | None = None,
-           ctx=None, force: float = 0, n_expected: int = 0) -> list[dict]:
+           ctx=None, force: float = 0, n_expected: int = 0,
+           searched: list | None = None) -> list[dict]:
     """Title cards found in the file: [{code, title, text, score, time, frames}].
     For each probable episode start, look in the window learned for this series
-    first (fast), then the full window if nothing turned up."""
+    first (fast), then the full window if nothing turned up.
+    searched: if given, receives the [start, end] windows that were read (for the log)."""
     full = float(get_settings()["titlecard_scan_seconds"])
     found: list[dict] = []
-    for s in episode_starts(duration, segments, runtime_min, n_expected):
-        cards = []
-        if learned_window:
-            a, b = learned_window
-            cards = cards_from_frames(scan_window(video, s + a, b - a, index, ctx, force=force))
-        if not any(not c["partial"] for c in cards):
-            more = cards_from_frames(
-                scan_window(video, s, min(full, max(10.0, duration - s)), index, ctx, force=force))
-            cards = more if more else cards
+    log = searched if searched is not None else []
+
+    def scan(a: float, length: float) -> list[dict]:
+        a, length = max(0.0, a), min(length, max(10.0, duration - max(0.0, a)))
+        log.append([round(a), round(a + length)])
+        return cards_from_frames(scan_window(video, a, length, index, ctx, force=force))
+
+    def add(cards):
         for c in cards:
             if not any(c.get("code") == f.get("code") and c.get("text") == f.get("text")
                        and abs(c["time"] - f["time"]) < 30 for f in found):
                 found.append(c)
+
+    for s in episode_starts(duration, segments, runtime_min, n_expected):
+        cards = []
+        if learned_window:
+            a, b = learned_window
+            cards = scan(s + a, b - a)
+        if not any(not c["partial"] for c in cards):
+            more = scan(s, full)
+            cards = more if more else cards
+        add(cards)
     found.sort(key=lambda c: c["time"])
     return found
 
