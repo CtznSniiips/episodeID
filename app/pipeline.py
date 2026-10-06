@@ -273,29 +273,35 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
         confirmed: set[str] = set()  # filename episodes a title card has confirmed
         originals = {id(sg): dict(sg) for sg in segs}  # what the dialogue said, before cards
         for c in f["title_cards"]:
-            # the segment this card belongs to: the last one starting before (card time + 60 s)
-            idx = max([j for j, sg in enumerate(segs) if sg["start"] <= c["time"] + 60] or [0])
-            sg = segs[idx]
+            # The stretch of dialogue this card belongs to: one it falls inside (a card can
+            # come up to 60 s before its dialogue starts, and 15 s after a stretch ends, as
+            # dialogue is matched in overlapping windows). None → the card is in a stretch
+            # where the dialogue matched nothing — at the start, between, or at the end.
+            inside = [j for j, sg in enumerate(segs)
+                      if sg["start"] - 60 <= c["time"] <= sg["end"] + 15]
+            idx = max(inside) if inside else None
+            sg = segs[idx] if idx is not None else None
             pos_expected = _expected_at(expected, c["time"], dur)
             if c.get("partial"):
-                code = _resolve_partial(c, None if c["time"] > sg["end"] + 15 else sg,
-                                        [pos_expected] if pos_expected else expected)
+                code = _resolve_partial(c, sg, [pos_expected] if pos_expected else expected)
                 if not code:
                     continue  # incomplete read that matches nothing else: no evidence
                 c = {**c, "code": code}
-            if c["time"] > sg["end"] + 15:
-                # The card is in a stretch where the dialogue matched nothing (typically an
-                # episode with no reference): the card starts a segment of its own.
-                nxt = segs[idx + 1]["start"] if idx + 1 < len(segs) else dur
+            if sg is None:
+                # Typically an episode with no reference: the card starts a segment of its
+                # own, filling the unmatched stretch.
+                prev = max([j for j, x in enumerate(segs) if x["end"] <= c["time"]] or [-1])
+                lo = segs[prev]["end"] if prev >= 0 else 0.0
+                hi = segs[prev + 1]["start"] if prev + 1 < len(segs) else dur
                 ok = c["code"] in expected or not expected or set(expected) <= confirmed
-                new = {"start": sg["end"], "end": nxt, "code": c["code"], "score": c["score"],
+                new = {"start": lo, "end": hi, "code": c["code"], "score": c["score"],
                        "margin": 0, "alternatives": [], "title_card": c,
                        "confidence": "high" if ok else "conflict",
                        "evidence": "title+filename" if c["code"] in expected else "title",
                        "why": "" if ok else f"title card reads '{c['text']}' ({c['code']}) where the "
                                             f"dialogue matched nothing; the filename says "
                                             f"{', '.join(expected)}"}
-                segs.insert(idx + 1, new)
+                segs.insert(prev + 1, new)
                 if c["code"] in expected:
                     confirmed.add(c["code"])
                 notes.append(f"title card '{c['text']}' → {c['code']} where the dialogue matched nothing")
@@ -371,7 +377,9 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
             prev = absorbed[-1] if absorbed else None
             if (prev and prev.get("title_card") and prev.get("confidence") == "high"
                     and not sg.get("title_card") and sg.get("confidence") == "low"
-                    and sg["code"] not in expected and sg["code"] != prev["code"]):
+                    and sg["code"] not in expected and sg["code"] != prev["code"]
+                    and (len(expected) < 2 or _expected_at(
+                        expected, (sg["start"] + sg["end"]) / 2, dur) in (None, prev["code"]))):
                 rt_min = (runtimes or {}).get(prev["code"])
                 if not rt_min or sg["end"] - prev["start"] <= rt_min * 60 * 1.4:
                     prev["end"] = sg["end"]

@@ -112,3 +112,30 @@ f, got = run(["S01E13", "S01E14"], 1395, [seg(0, 743, "S01E13", "high", .4)],
 print("S01E13E14", f["status"], got)
 assert [c for c, *_ in got] == ["S01E13", "S01E14"] and f["status"] == "OK" and got[1][2] == 1395, f["segments"]
 print("PASS (card inside the previous stretch)")
+
+# The 6 Oct screenshot: the first episode's dialogue matched nothing, so the file's first
+# stretch of dialogue is the SECOND episode. The first card (0:48) must fill the opening
+# gap, not relabel the second episode; the second card then confirms the second episode.
+EPS4 = [(3, 45, "Pups Raise the Paw Patroller"), (3, 46, "Pups Save the Crows"),
+        (10, 26, "Pups Save a Baby Caribou"), (10, 27, "Pups Save Luke and His Luke-Alike"), (4, 41, "Pups Save a Hoot")]
+idx = titlecard.TitleIndex([{"season": s, "episode": e, "title": t} for s, e, t in EPS + EPS2 + EPS3 + EPS4])
+refs.update({"S03E46": "x", "S04E41": "x"})
+for name, exp, dsegs, cards in (
+        ("S03E45E46", ["S03E45", "S03E46"], [seg(653, 1341, "S03E46", "high", .4)],
+         [("PUPS RAISETHE PAW PATROLLER", 44), ("PUPS SAVE THE CROWS", 700)]),
+        ("S10E26E27", ["S10E26", "S10E27"], [seg(698, 1397, "S04E41", "high", .2)],
+         [("PUPS SAVEA BABY CARIBOU", 48), ("PUPS SAVE LUKE AND HIS LUKE-ALIKE", 746)]),
+        # second card not found: first half still gets E26, second half is left for review
+        ("S10E26E27 one card", ["S10E26", "S10E27"], [seg(698, 1397, "S04E41", "high", .2)],
+         [("PUPS SAVEA BABY CARIBOU", 48)])):
+    pipeline._discount_unreferenced(dsegs, exp, 1397, refs)
+    f = {"expected": exp, "duration": 1397, "text_source": "embedded", "segments": dsegs}
+    pipeline._apply_title_cards(f, [{**idx.read(t), "time": at} for t, at in cards])
+    got = [(sg["code"], round(sg["start"]), round(sg["end"])) for sg in f["segments"]]
+    print(name, f["status"], got)
+    assert got[0][0] == exp[0] and got[0][1] == 0, got
+    if len(cards) == 2:
+        assert [c for c, *_ in got] == exp and f["status"] == "OK", f["segments"]
+    else:
+        assert f["status"] == "LOW_CONFIDENCE" and f["segments"][1]["code"] != "S10E26", f["segments"]
+print("PASS (card in the opening gap)")
