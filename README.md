@@ -47,7 +47,7 @@ subtitles, references or anyone's episode numbering:
   video decoding uses NVDEC there, or VAAPI on Intel/AMD integrated graphics when
   `/dev/dri` is passed to the container. Everything falls back to the CPU on its own;
   *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
-- Text from the opening titles that looks like an episode title (Bluey's intro names "BINGO" about 20 s into every episode) is spotted the first time a series is scanned: a title read in most of a sample of files whose names say otherwise is ignored at that point in an episode, and still counts as a title card anywhere else.
+- Text from the opening titles that looks like an episode title (Bluey's intro names "BINGO" about 20 s into every episode) is spotted on each scan from a sample of files spread across the library: the same title read at the same point in several files whose names say otherwise is ignored at that point, and still counts as a title card anywhere else.
 - Only large on-screen text counts, and it must match one title clearly better than any
   other, so signs and credits in the background are ignored. OCR results are cached; to read
   the cards from the videos again, use *Series options → Rescan, re-reading title cards*.

@@ -43,9 +43,9 @@ for s, e in FILES:
                     "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-g", "10", str(p)], check=True)
 
 db.init()
-# Saved by the previous version (codes only, no position): must be checked again.
+# An earlier check that found nothing must not stop the check finding it now.
 sid = db.add_series(777, "Bluey", "2018", str(root), None, options={
-    "title_cards": "on", "title_cards_status": {"recurring": ["S02E09"], "recurring_checked": True}})
+    "title_cards": "on", "title_cards_status": {"recurring": {}, "recurring_checked": True}})
 db.update_series(sid, episodes=[{"season": s, "episode": e, "title": t, "overview": "", "runtime": 7}
                                 for (s, e), t in EPS.items()])
 j = db.add_job("scan", sid, {})

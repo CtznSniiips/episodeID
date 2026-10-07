@@ -459,10 +459,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     rt = {c: e["runtime"] for c, e in eps.items() if e.get("runtime")}
     status = dict(opts.get("title_cards_status") or {})
     if not isinstance(status.get("recurring", {}), dict):
-        # Found by an earlier version, which didn't record where the text appears:
-        # check again.
-        status.pop("recurring", None)
-        status.pop("recurring_checked", None)
+        status.pop("recurring", None)  # earlier format (no position): found again below
     force = 0.0
     if reread:
         # Re-read the videos instead of reusing cached OCR, and redo the auto test
@@ -471,7 +468,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         if mode == "auto":
             status = {}
         else:
-            for k in ("window", "recurring", "recurring_checked"):
+            for k in ("window", "recurring"):
                 status.pop(k, None)
         ctx.log("Title cards: re-reading from the video files (cached OCR ignored).")
     scope_all = opts.get("title_cards_scope") == "all"
@@ -514,46 +511,56 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         elif looked:
             ctx.log(f"  title card {f['rel']}: none read (looked at {looked})")
 
-    if "recurring_checked" not in status:
-        # Text from the opening titles can look like an episode title (Bluey's intro
-        # names "BINGO" in every episode, and "Bingo" is an episode). A title read in
-        # most of a sample of files whose names say otherwise is that kind of text:
-        # from then on only an exact read of it counts. Checked once per series.
-        sample = [f for f in files if f["status"] != "ERROR" and f.get("expected")][:8]
-        if len(sample) >= 3:
-            ctx.log(f"Title cards: checking {len(sample)} files for text that appears in every "
-                    "episode (opening titles)…")
-            seen: dict[str, set] = {}
-            texts: dict[str, set] = {}
-            at: dict[str, list] = {}
-            for n, f in enumerate(sample):
-                ctx.check_cancel()
-                ctx.progress(n / len(sample), f"Title cards (opening titles): {Path(f['rel']).name}")
-                dur = float(f.get("duration") or 0)
-                starts = titlecard.episode_starts(dur, f["segments"], runtime, len(f["expected"]))
-                for c in run(f, None):
-                    if not c.get("partial") and c.get("code") and c["code"] not in f["expected"]:
-                        seen.setdefault(c["code"], set()).add(f["rel"])
-                        texts.setdefault(c["code"], set()).add(c["text"])
-                        base = max([x for x in starts if x <= c["time"]] or [0.0])
-                        at.setdefault(c["code"], []).append(c["time"] - base)
-            new = {code for code, rels in seen.items()
-                   if len(rels) >= 3 and len(rels) >= len(sample) / 2} - set(recurring)
-            if new:
-                for code in new:
-                    ts = sorted(at[code])
-                    recurring[code] = round(ts[len(ts) // 2], 1)
-                index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")),
-                                             recurring)
-                status.pop("window", None)  # learned from the opening titles' position
-                for code in sorted(new):
-                    ctx.log(f"Title cards: '{sorted(texts[code])[0]}' shows in {len(seen[code])} of "
-                            f"{len(sample)} files about {_fmt_t(recurring[code])} into the episode — "
-                            f"opening titles, not the title of {code}. Ignored there; a {code} "
-                            "title card anywhere else still counts.")
-            hit_times.clear()
+    # Text from the opening titles can look like an episode title (Bluey's intro names
+    # "BINGO" about 20 s into every episode, and "Bingo" is an episode). Check a sample
+    # spread across the library: the same title read at the same point in several files
+    # whose names say otherwise is that kind of text, and is ignored at that point.
+    # Runs every scan; after the first time the sample's videos come from the cache.
+    pool_all = sorted((f for f in files if f["status"] != "ERROR" and f.get("expected")),
+                      key=lambda f: f["rel"])
+    step = max(1, len(pool_all) // 12)
+    sample = pool_all[::step][:12]
+    if len(sample) >= 3:
+        ctx.log(f"Title cards: checking {len(sample)} files across the library for text that "
+                "appears in every episode (opening titles)…")
+        found_at: dict[str, list] = {}   # code → [(rel, seconds into episode, text)]
+        for n, f in enumerate(sample):
+            ctx.check_cancel()
+            ctx.progress(n / len(sample), f"Title cards (opening titles): {Path(f['rel']).name}")
+            dur = float(f.get("duration") or 0)
+            starts = titlecard.episode_starts(dur, f["segments"], runtime, len(f["expected"]))
+            for c in run(f, None):
+                if not c.get("partial") and c.get("code") and c["code"] not in f["expected"]:
+                    base = max([x for x in starts if x <= c["time"]] or [0.0])
+                    found_at.setdefault(c["code"], []).append((f["rel"], c["time"] - base, c["text"]))
+        new = {}
+        for code, hits in found_at.items():
+            if code in recurring:
+                continue
+            ts = sorted(h[1] for h in hits)
+            med = ts[len(ts) // 2]
+            near = {h[0] for h in hits if abs(h[1] - med) <= titlecard.RECUR_TOL}
+            if len(near) >= 3 and len(near) >= len(sample) / 3:
+                new[code] = (round(med, 1), len(near), sorted({h[2] for h in hits})[0])
+        if new:
+            for code, (med, _n, _t) in new.items():
+                recurring[code] = med
+            index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")),
+                                         recurring)
+            status.pop("window", None)  # learned from the opening titles' position
+            for code, (med, n_files, txt) in sorted(new.items()):
+                ctx.log(f"Title cards: '{txt}' shows in {n_files} of {len(sample)} files about "
+                        f"{_fmt_t(med)} into the episode — opening titles, not the title of {code}. "
+                        f"Ignored there; a {code} title card anywhere else still counts.")
+        elif recurring:
+            ctx.log("Title cards: opening-titles text already known: " + ", ".join(
+                f"{code} at {_fmt_t(t)}" for code, t in sorted(recurring.items())) + ".")
+        else:
+            ctx.log("Title cards: no opening-titles text found.")
+        hit_times.clear()
+        if new or status.get("recurring") != recurring:
             status["recurring"] = recurring
-            status["recurring_checked"] = True
+            status.pop("recurring_checked", None)
             opts["title_cards_status"] = status
             db.update_series(series["id"], options=opts)
 
@@ -577,7 +584,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             done.add(f["rel"])
         has = bool(pool) and hits >= max(2, (len(pool) + 1) // 2)
         status = {"has_cards": has, "probed": len(pool), "hits": hits,
-                  **{k: status[k] for k in ("recurring", "recurring_checked") if k in status}}
+                  **{k: status[k] for k in ("recurring",) if k in status}}
         if has:
             status["window"] = learn()
         opts["title_cards_status"] = status
