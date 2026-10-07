@@ -1,6 +1,6 @@
 """Opening-titles text that looks like an episode title (Bluey).
 
-Bluey's intro names the family — "MUM", "DAD", "BINGO'S" — in every episode, and
+Bluey's intro names the family — "MUM", "DAD", "BINGO" — in every episode, and
 "Bingo" is also an episode title. Five files, each with "BINGO'S" at 0:19 and its own
 card at 0:43; one of them is the Bingo episode. Expected: the intro text is
 recognised as recurring and ignored (and doesn't stop the scan before the real
@@ -37,13 +37,15 @@ root = W / "media" / "Bluey (2018)"
 for s, e in FILES:
     p = root / f"Season {s}" / f"Bluey (2018) - S{s:02d}E{e:02d} - {EPS[(s, e)]}.mkv"
     p.parent.mkdir(parents=True, exist_ok=True)
-    vf = ",".join([text("MUM", 8), text("DAD", 13), text("BINGO’S", 19, 70),
+    vf = ",".join([text("MUM", 8), text("DAD", 13), text("BINGO", 19, 70),
                    text(EPS[(s, e)].upper(), 43, 64, 0.45)])
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=854x480:r=5:d=90",
                     "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-g", "10", str(p)], check=True)
 
 db.init()
-sid = db.add_series(777, "Bluey", "2018", str(root), None, options={"title_cards": "on"})
+# Saved by the previous version (codes only, no position): must be checked again.
+sid = db.add_series(777, "Bluey", "2018", str(root), None, options={
+    "title_cards": "on", "title_cards_status": {"recurring": ["S02E09"], "recurring_checked": True}})
 db.update_series(sid, episodes=[{"season": s, "episode": e, "title": t, "overview": "", "runtime": 7}
                                 for (s, e), t in EPS.items()])
 j = db.add_job("scan", sid, {})
@@ -55,7 +57,7 @@ by = {Path(f["rel"]).name: f for f in scan["files"]}
 for name, f in sorted(by.items()):
     print(f"{f['status']:16} {name}  {[sg['code'] for sg in f['segments']]}")
 st = db.get_series(sid)["options"]["title_cards_status"]
-assert st.get("recurring") == ["S02E09"], st
+assert list(st.get("recurring") or {}) == ["S02E09"] and 15 <= st["recurring"]["S02E09"] <= 24, st
 for (s, e) in FILES:
     f = by[f"Bluey (2018) - S{s:02d}E{e:02d} - {EPS[(s, e)]}.mkv"]
     assert [sg["code"] for sg in f["segments"]] == [f"S{s:02d}E{e:02d}"], f

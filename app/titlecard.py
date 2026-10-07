@@ -42,6 +42,7 @@ MIN_CONF = 0.75         # OCR confidence for a line to be considered
 # Identifies how cached OCR was produced (engine settings, frame size). Cached windows
 # from other settings that found no complete title are read again.
 OCR_SIG = f"rapidocr-1|{FRAME_W}x{FRAME_H}|det-min-{FRAME_H}"
+RECUR_TOL = 8           # seconds either side of where recurring intro text appears
 CARD_SETTLE = 6         # keep reading this many seconds after a card first appears…
 CARD_SETTLE_PARTIAL = 12  # …or this long if only part of a title has been read so far
 
@@ -167,10 +168,12 @@ class TitleIndex:
     """Fuzzy lookup of on-screen text against a series' episode titles."""
 
     def __init__(self, episodes: list[dict], include_specials: bool = False,
-                 recurring: set | list | None = None):
-        # Titles also read in a series' opening titles (Bluey's intro names "BINGO"):
-        # for these only an exact read of the title counts.
-        self.recurring = set(recurring or ())
+                 recurring: dict | None = None):
+        # Titles that also show up in a series' opening titles (Bluey's intro names
+        # "BINGO" ~20 s in): code → seconds into an episode where that text appears.
+        # A read of that title near that point is ignored; elsewhere it counts.
+        self.recurring = {k: float(v) for k, v in (recurring or {}).items()} \
+            if isinstance(recurring, dict) else {}
         self.titles: list[dict] = []
         for e in episodes:
             if e["season"] == 0 and not include_specials:
@@ -230,17 +233,17 @@ class TitleIndex:
         if c not in memo:
             if len(memo) > 20000:
                 memo.clear()
-            r = self._without_recurring(c, self._read(text))
+            r = self._read(text)
             memo[c] = r and {k: v for k, v in r.items() if k != "text"}
         r = memo[c]
         return r and {**r, "text": text}
 
-    def _without_recurring(self, c: str, r: dict | None) -> dict | None:
-        """Drop matches to recurring titles unless the text is exactly that title."""
-        if not r or not self.recurring:
+    def not_recurring(self, r: dict | None, at: float | None) -> dict | None:
+        """Drop a read of a recurring title made where that text recurs (`at` = seconds
+        into the episode). Without a time nothing is dropped."""
+        if not r or not self.recurring or at is None:
             return r
-        exact = {t["code"] for t in self.titles if t["ns"] == c}
-        drop = lambda code: code in self.recurring and code not in exact  # noqa: E731
+        drop = lambda code: code in self.recurring and abs(at - self.recurring[code]) <= RECUR_TOL  # noqa: E731
         if not r["partial"]:
             return None if drop(r["code"]) else r
         cands = [x for x in r.get("candidates") or [] if not drop(x)]
@@ -345,7 +348,7 @@ class TitleIndex:
                     "candidates": list(dict.fromkeys(cands))}
         return None
 
-    def match_frame(self, lines: list[list]) -> dict | None:
+    def match_frame(self, lines: list[list], at: float | None = None) -> dict | None:
         """lines: [[text, conf, height_fraction, y_fraction], ...] for one frame."""
         # Lines without a real word (counters, clocks, "214", "09:09:09") never belong to
         # a title and would hide that a read is only the start of a longer title.
@@ -369,7 +372,7 @@ class TitleIndex:
                     dedup = [w for k, w in enumerate(words) if k == 0 or w.lower() != words[k - 1].lower()]
                     if len(dedup) < len(words):
                         cands.append(" ".join(dedup))
-        reads = [r for r in (self.read(c) for c in dict.fromkeys(cands)) if r]
+        reads = [r for r in (self.not_recurring(self.read(c), at) for c in dict.fromkeys(cands)) if r]
         if not reads:
             return None
         # Prefer complete reads, then the most specific (longest) text.
@@ -459,15 +462,17 @@ def _cache_path(video: Path, start: float, length: float, fps: float,
 
 
 def scan_window(video: Path, start: float, length: float, index: TitleIndex,
-                ctx=None, stop_on_hit: bool = True, force: float = 0) -> list[dict]:
+                ctx=None, stop_on_hit: bool = True, force: float = 0,
+                ep_start: float | None = None) -> list[dict]:
     """OCR one window of the video. Returns per-frame records [{t, lines, hit}].
     Keyframes are read first (fast); the window is only fully decoded if that
     finds no title card. force=<timestamp> ignores OCR cached before that time
     ("re-read title cards": each window is read once per job, not once per call)."""
-    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key", force)
+    ep = start if ep_start is None else ep_start
+    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key", force, ep)
     if any(fr.get("hit") and not fr["hit"]["partial"] for fr in frames):
         return frames
-    full = _scan_pass(video, start, length, index, ctx, stop_on_hit, "full", force)
+    full = _scan_pass(video, start, length, index, ctx, stop_on_hit, "full", force, ep)
     return full if any(fr.get("hit") for fr in full) else frames
 
 
@@ -475,13 +480,14 @@ def _settle(full_seen: bool) -> float:
     return CARD_SETTLE if full_seen else CARD_SETTLE_PARTIAL
 
 
-def _reuse_cached(data: dict, index: TitleIndex, fps: float) -> list[dict] | None:
+def _reuse_cached(data: dict, index: TitleIndex, fps: float,
+                  ep_start: float = 0.0) -> list[dict] | None:
     """Cached frames re-matched with the current rules, or None if they don't cover
     what the current rules need (a scan stopped early, after a card that is now read
     differently or now needs longer to settle)."""
     frames = data["frames"]
     for fr in frames:
-        fr["hit"] = index.match_frame(fr["lines"])
+        fr["hit"] = index.match_frame(fr["lines"], fr["t"] - ep_start)
     if data.get("ocr") != OCR_SIG and not any(fr["hit"] and not fr["hit"]["partial"] for fr in frames):
         return None  # read by an older version that found no title here: read it again
     if data.get("complete", True):
@@ -501,11 +507,12 @@ def _reuse_cached(data: dict, index: TitleIndex, fps: float) -> list[dict] | Non
 
 
 def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
-               ctx, stop_on_hit: bool, mode: str, force: float = 0) -> list[dict]:
+               ctx, stop_on_hit: bool, mode: str, force: float = 0,
+               ep_start: float = 0.0) -> list[dict]:
     fps = float(get_settings()["titlecard_fps"])
     cache = _cache_path(video, start, length, fps, mode)
     if cache.exists() and not (force and cache.stat().st_mtime < force):
-        frames = _reuse_cached(json.loads(cache.read_text()), index, fps)
+        frames = _reuse_cached(json.loads(cache.read_text()), index, fps, ep_start)
         if frames is not None:
             return frames
 
@@ -525,7 +532,7 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
             continue  # same shot as the previous OCR'd frame (not skipped once a card is showing)
         last_thumb = thumb
         lines = _ocr_frame(img)
-        hit = index.match_frame(lines)
+        hit = index.match_frame(lines, t - ep_start)
         frames.append({"t": t, "lines": lines, "hit": hit})
         if hit:
             first_hit_t = t if first_hit_t is None else first_hit_t
@@ -550,7 +557,7 @@ def inspect(video: Path, start: float, length: float, index: TitleIndex,
     out = []
     for t, img in raw:
         lines = _ocr_frame(img)
-        hit = index.match_frame(lines)
+        hit = index.match_frame(lines, t)  # the range is taken as starting with the episode
         out.append({"t": t, "lines": lines, "size": [int(img.shape[1]), int(img.shape[0])],
                     "hit": hit and {k: hit.get(k) for k in ("code", "title", "text", "partial", "candidates")}})
     return {"decode": used, "mode": mode, "fps": fps, "frames": out,
@@ -620,10 +627,10 @@ def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex
     found: list[dict] = []
     log = searched if searched is not None else []
 
-    def scan(a: float, length: float) -> list[dict]:
+    def scan(a: float, length: float, ep: float) -> list[dict]:
         a, length = max(0.0, a), min(length, max(10.0, duration - max(0.0, a)))
         log.append([round(a), round(a + length)])
-        return cards_from_frames(scan_window(video, a, length, index, ctx, force=force))
+        return cards_from_frames(scan_window(video, a, length, index, ctx, force=force, ep_start=ep))
 
     def add(cards):
         for c in cards:
@@ -635,9 +642,9 @@ def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex
         cards = []
         if learned_window:
             a, b = learned_window
-            cards = scan(s + a, b - a)
+            cards = scan(s + a, b - a, s)
         if not any(not c["partial"] for c in cards):
-            more = scan(s, full)
+            more = scan(s, full, s)
             cards = more if more else cards
         add(cards)
     found.sort(key=lambda c: c["time"])
