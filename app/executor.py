@@ -294,6 +294,71 @@ def undo_apply(series: dict, apply: dict, ctx) -> dict:
     return {"restored": restored, "parked": parked, "problems": problems}
 
 
+# -------------------------------------------------------------------- backup
+
+def backup_dir(series: dict) -> Path:
+    """The series' backup folder. Refuses settings that would point anywhere but a
+    plain subfolder of the series (empty, ".", "..", nested paths)."""
+    name = (get_settings()["backup_folder"] or "").strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise ValueError(f"Backup folder setting {name!r} isn't a plain folder name")
+    root = Path(series["path"]).resolve()
+    d = root / name
+    if d.is_symlink() or (d.exists() and d.resolve().parent != root):
+        raise ValueError(f"{d} isn't a folder inside the series")
+    return d
+
+
+def _walk_files(d: Path):
+    for dirpath, dirnames, filenames in os.walk(d, followlinks=False):
+        for n in filenames + [x for x in dirnames if os.path.islink(os.path.join(dirpath, x))]:
+            yield Path(dirpath) / n
+
+
+def backup_summary(series: dict) -> dict:
+    d = backup_dir(series)
+    buckets: dict[str, dict] = {}
+    if d.is_dir():
+        for f in _walk_files(d):
+            rel = f.relative_to(d)
+            b = rel.parts[0] if len(rel.parts) > 1 else "(top level)"
+            e = buckets.setdefault(b, {"name": b, "files": 0, "bytes": 0})
+            e["files"] += 1
+            try:
+                e["bytes"] += 0 if f.is_symlink() else f.stat().st_size
+            except OSError:
+                pass
+    out = sorted(buckets.values(), key=lambda b: b["name"])
+    return {"folder": d.name, "buckets": out, "files": sum(b["files"] for b in out),
+            "bytes": sum(b["bytes"] for b in out)}
+
+
+def delete_backup(series: dict, buckets: list[str]) -> dict:
+    """Permanently delete the backed-up files in the chosen subfolders."""
+    d = backup_dir(series)
+    if not d.is_dir():
+        return {"deleted": 0, "bytes": 0, "errors": []}
+    wanted = set(buckets)
+    deleted, freed, errors = 0, 0, []
+    for f in list(_walk_files(d)):
+        rel = f.relative_to(d)
+        b = rel.parts[0] if len(rel.parts) > 1 else "(top level)"
+        if b not in wanted:
+            continue
+        try:
+            size = 0 if f.is_symlink() else f.stat().st_size
+            f.unlink()  # a symlink is removed itself, never followed
+            deleted, freed = deleted + 1, freed + size
+        except OSError as e:
+            errors.append(f"{rel}: {e.strerror or e}")
+    for dirpath, _dirs, _files in sorted(os.walk(d, followlinks=False), key=lambda w: -len(w[0])):
+        try:
+            os.rmdir(dirpath)  # only succeeds when empty
+        except OSError:
+            pass
+    return {"deleted": deleted, "bytes": freed, "errors": errors[:50]}
+
+
 # -------------------------------------------------------------------- Sonarr
 
 def sonarr_rescan(series: dict, ctx) -> None:

@@ -52,7 +52,7 @@ subtitles, references or anyone's episode numbering:
   the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
 
 ### Safety
-- Nothing is deleted. Displaced files go to `<series>/_episodeid_backup/`: `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.
+- Nothing is deleted unless you ask: *Series options → Backup folder* shows what's there (count and size per folder) and deletes the folders you tick, after typing DELETE. Displaced files go to `<series>/_episodeid_backup/`: `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.
 - Every disk operation is logged as it happens, so even an interrupted apply can be undone.
 - Renames go through temporary names in two passes, so swaps and rotations are safe.
 - Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap between episodes.

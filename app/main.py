@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, db, jobs, llm, titlecard, tvdb
+from . import __version__, db, executor, jobs, llm, titlecard, tvdb
 from . import pipeline  # noqa: F401  (registers job handlers)
 from .config import (CACHE_DIR, MEDIA_ROOT, env_locked_keys, get_settings, public_settings,
                      safe_media_path, save_settings)
@@ -21,6 +21,7 @@ from .references import (OpenSubtitles, _load_misses, clear_reference, ep_code, 
 from .media_text import VIDEO_EXTS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("episodeid")
 STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="EpisodeID", version=__version__)
@@ -433,6 +434,36 @@ def delete_reference(sid: int, code: str):
 class JobReq(BaseModel):
     kind: str
     params: dict = {}
+
+
+@app.get("/api/series/{sid}/backup")
+def backup_get(sid: int):
+    series = db.get_series(sid) or _404()
+    try:
+        return executor.backup_summary(series)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+class BackupDeleteReq(BaseModel):
+    buckets: list[str]
+    confirm: str = ""
+
+
+@app.post("/api/series/{sid}/backup/delete")
+def backup_delete(sid: int, body: BackupDeleteReq):
+    series = db.get_series(sid) or _404()
+    if body.confirm != "DELETE":
+        raise HTTPException(400, "Type DELETE to confirm")
+    if db.active_job(sid):
+        raise HTTPException(409, "A job is running for this series — try again when it's finished")
+    try:
+        r = executor.delete_backup(series, body.buckets)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    log.info("series %s: deleted %s backed-up files (%s bytes) from %s", sid, r["deleted"], r["bytes"],
+             body.buckets)
+    return r
 
 
 class CardCheckReq(BaseModel):

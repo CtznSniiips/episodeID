@@ -680,6 +680,11 @@ async function tabOptions() {
       <textarea name="fandom_title_overrides" rows="4" class="mono" placeholder='{"S01E01": "The DVD/Transcript"}'>${esc(o.fandom_title_overrides ? JSON.stringify(o.fandom_title_overrides, null, 1) : "")}</textarea>
       <div class="hint">JSON object: episode code → wiki page title or URL, e.g. {"S01E03": "https://pawpatrol.fandom.com/wiki/Pups_Save_the_Sea_Turtles/Transcript"}. Underscores and full URLs are fine.</div></div>
     </fieldset>
+    <fieldset><legend>Backup folder</legend>
+      <div class="hint" style="margin-bottom:8px">Files EpisodeID moved out of the way (duplicates, unverified files,
+        originals of split files, old metadata…). Nothing is ever deleted unless you do it here.</div>
+      <div id="bk"><span class="muted small">Loading…</span></div>
+    </fieldset>
     <div class="row"><button class="btn danger" type="button" id="del">Remove series from EpisodeID</button>
       <div class="spacer"></div><button class="btn primary" type="submit">Save</button></div></form>`;
   $("#opts").onsubmit = async (e) => {
@@ -701,11 +706,72 @@ async function tabOptions() {
     if (!confirm("Scan again, reading every title card from the video files instead of the cache? This takes longer than a normal scan.")) return;
     startJob("scan", { reread_cards: true }); toast("Rescanning — see the job log.");
   };
+  loadBackup(s);
   $("#find-wiki").onclick = () => { startJob("fetch_refs", { find_wiki: true }); toast("Looking for the wiki — see the job log."); };
   $("#del").onclick = async () => {
     if (!confirm("Remove this series from EpisodeID? No media files are touched.")) return;
     await api(`/api/series/${s.id}`, { method: "DELETE" });
     location.hash = "#/";
+  };
+}
+
+const BACKUP_INFO = {
+  duplicates: "copies of episodes another file was a better match for",
+  unverified: "files whose name a confirmed file needed",
+  split_originals: "the original files that were split",
+  metadata: "old .nfo files and thumbnails",
+  conflicts: "files that were in the way of a rename",
+  undone: "files created by an apply that was undone",
+  undo_conflicts: "restored copies whose original place was taken",
+};
+
+function fmtBytes(n) {
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i && n < 10 ? 1 : 0)} ${u[i]}`;
+}
+
+async function loadBackup(s) {
+  const el = $("#bk");
+  if (!el) return;
+  let b;
+  try { b = await api(`/api/series/${s.id}/backup`); }
+  catch (e) { el.innerHTML = `<span class="badge b-bad">Error</span> ${esc(e.message)}`; return; }
+  if (!b.files) { el.innerHTML = `<span class="muted small">Empty — nothing in ${esc(b.folder)}/.</span>`; return; }
+  el.innerHTML = `<table><tr><th style="width:28px"><input type="checkbox" id="bk-all" checked></th><th>Folder</th><th>Files</th><th>Size</th></tr>
+    ${b.buckets.map((k) => `<tr><td><input type="checkbox" class="bk" value="${esc(k.name)}" checked></td>
+      <td><span class="mono">${esc(b.folder)}/${esc(k.name === "(top level)" ? "" : k.name + "/")}</span>
+        ${BACKUP_INFO[k.name] ? `<div class="muted small">${esc(BACKUP_INFO[k.name])}</div>` : ""}</td>
+      <td>${k.files}</td><td>${fmtBytes(k.bytes)}</td></tr>`).join("")}</table>
+    <div class="row" style="margin-top:8px"><span class="small muted">${b.files} files, ${fmtBytes(b.bytes)} in total</span>
+      <div class="spacer"></div><button class="btn danger small" type="button" id="bk-del">Delete selected…</button></div>`;
+  $("#bk-all").onchange = (e) => $$(".bk", el).forEach((c) => c.checked = e.target.checked);
+  $("#bk-del").onclick = () => {
+    const chosen = $$(".bk", el).filter((c) => c.checked).map((c) => c.value);
+    if (!chosen.length) return toast("Nothing selected");
+    const sel = b.buckets.filter((k) => chosen.includes(k.name));
+    const n = sel.reduce((a, k) => a + k.files, 0), size = sel.reduce((a, k) => a + k.bytes, 0);
+    const box = modal(`<h2 style="margin-top:0">Delete ${n} backed-up files?</h2>
+      <p>This permanently deletes <b>${n} files (${fmtBytes(size)})</b> from
+        ${sel.map((k) => `<span class="mono">${esc(b.folder)}/${esc(k.name === "(top level)" ? "" : k.name + "/")}</span>`).join(", ")}.</p>
+      <p class="muted small">It can't be undone, and <b>Undo</b> in History won't be able to bring these files back
+        for earlier applies — it will restore everything else and list them as missing.</p>
+      <p>Type <b>DELETE</b> to continue:</p>
+      <input type="text" id="confirm" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
+      <div class="row" style="margin-top:12px"><div class="spacer"></div>
+        <button class="btn" id="c">Cancel</button><button class="btn danger" id="go" disabled>Delete</button></div>`);
+    $("#c", box).onclick = closeModal;
+    $("#confirm", box).oninput = (e) => $("#go", box).disabled = e.target.value.trim() !== "DELETE";
+    $("#go", box).onclick = async () => {
+      $("#go", box).disabled = true;
+      try {
+        const r = await api(`/api/series/${s.id}/backup/delete`, { method: "POST", body: { buckets: chosen, confirm: "DELETE" } });
+        closeModal();
+        toast(`Deleted ${r.deleted} files (${fmtBytes(r.bytes)})` + (r.errors.length ? ` — ${r.errors.length} couldn't be deleted` : ""));
+        loadBackup(s);
+      } catch (e) { fail(e); $("#go", box).disabled = false; }
+    };
+    $("#confirm", box).focus();
   };
 }
 
