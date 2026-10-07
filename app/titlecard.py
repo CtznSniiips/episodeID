@@ -463,17 +463,28 @@ def _cache_path(video: Path, start: float, length: float, fps: float,
 
 def scan_window(video: Path, start: float, length: float, index: TitleIndex,
                 ctx=None, stop_on_hit: bool = True, force: float = 0,
-                ep_start: float | None = None) -> list[dict]:
+                ep_start: float | None = None, expected=None) -> list[dict]:
     """OCR one window of the video. Returns per-frame records [{t, lines, hit}].
     Keyframes are read first (fast); the window is only fully decoded if that
     finds no title card. force=<timestamp> ignores OCR cached before that time
     ("re-read title cards": each window is read once per job, not once per call)."""
     ep = start if ep_start is None else ep_start
-    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key", force, ep)
-    if any(fr.get("hit") and not fr["hit"]["partial"] for fr in frames):
+    frames = _scan_pass(video, start, length, index, ctx, stop_on_hit, "key", force, ep, expected)
+    if any(fr.get("hit") and not fr["hit"]["partial"] and _fits(fr["hit"], expected) for fr in frames):
         return frames
-    full = _scan_pass(video, start, length, index, ctx, stop_on_hit, "full", force, ep)
+    full = _scan_pass(video, start, length, index, ctx, stop_on_hit, "full", force, ep, expected)
     return full if any(fr.get("hit") for fr in full) else frames
+
+
+def _fits(hit: dict | None, expected) -> bool:
+    """Does this read fit the filename's episodes? (No filename episodes: anything fits.)"""
+    if not hit:
+        return False
+    if not expected:
+        return True
+    if not hit["partial"]:
+        return hit["code"] in expected
+    return any(c in expected for c in hit.get("candidates") or [])
 
 
 def _settle(full_seen: bool) -> float:
@@ -481,7 +492,7 @@ def _settle(full_seen: bool) -> float:
 
 
 def _reuse_cached(data: dict, index: TitleIndex, fps: float,
-                  ep_start: float = 0.0) -> list[dict] | None:
+                  ep_start: float = 0.0, expected=None) -> list[dict] | None:
     """Cached frames re-matched with the current rules, or None if they don't cover
     what the current rules need (a scan stopped early, after a card that is now read
     differently or now needs longer to settle)."""
@@ -496,7 +507,7 @@ def _reuse_cached(data: dict, index: TitleIndex, fps: float,
     for i, fr in enumerate(frames):
         if first is not None and fr["t"] > first + _settle(full_seen):
             return frames[:i]  # the current rules would have stopped here
-        if fr["hit"]:
+        if _fits(fr["hit"], expected):
             first = fr["t"] if first is None else first
             full_seen = full_seen or not fr["hit"]["partial"]
     if first is None:
@@ -508,11 +519,11 @@ def _reuse_cached(data: dict, index: TitleIndex, fps: float,
 
 def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
                ctx, stop_on_hit: bool, mode: str, force: float = 0,
-               ep_start: float = 0.0) -> list[dict]:
+               ep_start: float = 0.0, expected=None) -> list[dict]:
     fps = float(get_settings()["titlecard_fps"])
     cache = _cache_path(video, start, length, fps, mode)
     if cache.exists() and not (force and cache.stat().st_mtime < force):
-        frames = _reuse_cached(json.loads(cache.read_text()), index, fps, ep_start)
+        frames = _reuse_cached(json.loads(cache.read_text()), index, fps, ep_start, expected)
         if frames is not None:
             return frames
 
@@ -520,7 +531,10 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
     raw = _sample(video, start, length, fps, mode)
     frames, last_thumb = [], None
     complete, stopped_at = True, None
-    first_hit_t, full_seen = None, False
+    # Stop a few seconds after a card that fits the filename. A read that contradicts
+    # it (an intro roll call, a sign, credits) doesn't end the search: the real card
+    # may come later.
+    first_hit_t, any_hit, full_seen = None, False, False
     for t, img in raw:
         if ctx:
             ctx.check_cancel()
@@ -528,13 +542,14 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
             complete, stopped_at = False, t  # the card has had time to finish animating in
             break
         thumb = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (32, 18)).astype("int16")
-        if first_hit_t is None and last_thumb is not None and abs(thumb - last_thumb).mean() < 3:
+        if not any_hit and last_thumb is not None and abs(thumb - last_thumb).mean() < 3:
             continue  # same shot as the previous OCR'd frame (not skipped once a card is showing)
         last_thumb = thumb
         lines = _ocr_frame(img)
         hit = index.match_frame(lines, t - ep_start)
         frames.append({"t": t, "lines": lines, "hit": hit})
-        if hit:
+        any_hit = any_hit or bool(hit)
+        if _fits(hit, expected):
             first_hit_t = t if first_hit_t is None else first_hit_t
             full_seen = full_seen or not hit["partial"]
     cache.parent.mkdir(parents=True, exist_ok=True)
@@ -569,11 +584,18 @@ def cards_from_frames(frames: list[dict]) -> list[dict]:
     other) and keep the best reading of each: a complete read if there is one —
     the most frequent title, then the most specific text — otherwise the most
     specific partial read with its candidate titles."""
+    def codes(h):
+        return {h["code"]} if not h["partial"] else set(h.get("candidates") or [])
+
     groups: list[list[dict]] = []
     for fr in frames:
         if not fr.get("hit"):
             continue
-        if groups and fr["t"] - groups[-1][-1]["t"] <= 12:
+        # Same card: close in time and about the same title (a card animating in goes
+        # from a partial read to the full title). A different title starts a new group
+        # — an intro roll call of names must not merge with the real card after it.
+        if groups and fr["t"] - groups[-1][-1]["t"] <= 12 and \
+                codes(fr["hit"]) & codes(groups[-1][-1]["hit"]):
             groups[-1].append(fr)
         else:
             groups.append([fr])
@@ -618,7 +640,8 @@ def episode_starts(duration: float, segments: list[dict],
 def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex,
            learned_window: list | None = None, runtime_min: float | None = None,
            ctx=None, force: float = 0, n_expected: int = 0,
-           searched: list | None = None) -> list[dict]:
+           searched: list | None = None, expected: list | None = None,
+           keep_all: bool = False) -> list[dict]:
     """Title cards found in the file: [{code, title, text, score, time, frames}].
     For each probable episode start, look in the window learned for this series
     first (fast), then the full window if nothing turned up.
@@ -630,7 +653,8 @@ def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex
     def scan(a: float, length: float, ep: float) -> list[dict]:
         a, length = max(0.0, a), min(length, max(10.0, duration - max(0.0, a)))
         log.append([round(a), round(a + length)])
-        return cards_from_frames(scan_window(video, a, length, index, ctx, force=force, ep_start=ep))
+        return cards_from_frames(scan_window(video, a, length, index, ctx, force=force, ep_start=ep,
+                                             expected=expected))
 
     def add(cards):
         for c in cards:
@@ -643,12 +667,30 @@ def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex
         if learned_window:
             a, b = learned_window
             cards = scan(s + a, b - a, s)
-        if not any(not c["partial"] for c in cards):
+        if not any(not c["partial"] and _fits(c, expected) for c in cards):
             more = scan(s, full, s)
             cards = more if more else cards
+        # A card that fits the filename wins over other text read close to it (an intro
+        # roll call naming an engine that is also an episode title, credits…).
+        if not keep_all:
+            cards = _one_per_stretch(cards, expected)
         add(cards)
     found.sort(key=lambda c: c["time"])
     return found
+
+
+def _one_per_stretch(cards: list[dict], expected) -> list[dict]:
+    """Keep the most convincing card in each 2-minute stretch: one that fits the
+    filename, then a complete read, then the longer title (a title beats a name in an
+    intro roll call), then the one seen on more frames. Episodes in one file are
+    further apart than that."""
+    rank = lambda c: (_fits(c, expected) if expected else False, not c["partial"],  # noqa: E731
+                      len(_ns(c["text"])), c.get("frames", 1))
+    kept: list[dict] = []
+    for c in sorted(cards, key=rank, reverse=True):
+        if all(abs(c["time"] - k["time"]) > 120 for k in kept):
+            kept.append(c)
+    return sorted(kept, key=lambda c: c["time"])
 
 
 def vision_frames(video: Path, start: float, length: float,

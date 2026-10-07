@@ -475,11 +475,11 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     done: set[str] = set()
     hit_times: list[float] = []
 
-    def run(f: dict, learned) -> list[dict]:
+    def run(f: dict, learned, keep_all: bool = False) -> list[dict]:
         searched: list = []
         cards = titlecard.detect(root / f["rel"], float(f.get("duration") or 0), f["segments"],
                                  index, learned, runtime, ctx, force, len(f.get("expected") or []),
-                                 searched)
+                                 searched, f.get("expected") or [], keep_all)
         f["title_scan"] = _merge_windows(searched)
         for c in cards:
             starts = titlecard.episode_starts(float(f.get("duration") or 0), f["segments"], runtime,
@@ -529,7 +529,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             ctx.progress(n / len(sample), f"Title cards (opening titles): {Path(f['rel']).name}")
             dur = float(f.get("duration") or 0)
             starts = titlecard.episode_starts(dur, f["segments"], runtime, len(f["expected"]))
-            for c in run(f, None):
+            for c in run(f, None, keep_all=True):
                 if not c.get("partial") and c.get("code") and c["code"] not in f["expected"]:
                     base = max([x for x in starts if x <= c["time"]] or [0.0])
                     found_at.setdefault(c["code"], []).append((f["rel"], c["time"] - base, c["text"]))

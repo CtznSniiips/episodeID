@@ -48,6 +48,7 @@ subtitles, references or anyone's episode numbering:
   `/dev/dri` is passed to the container. Everything falls back to the CPU on its own;
   *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
 - Text from the opening titles that looks like an episode title (Bluey's intro names "BINGO" about 20 s into every episode) is spotted on each scan from a sample of files spread across the library: the same title read at the same point in several files whose names say otherwise is ignored at that point, and still counts as a title card anywhere else.
+- A read that contradicts the filename (an intro roll call of names, a sign) doesn't end the search for the card: the scan keeps going, and a card that fits the filename wins over other text read within 2 minutes of it. A file whose card really contradicts its name is still caught.
 - Only large on-screen text counts, and it must match one title clearly better than any
   other, so signs and credits in the background are ignored. OCR results are cached; to read
   the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
