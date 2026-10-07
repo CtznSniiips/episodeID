@@ -450,7 +450,9 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     except Exception:  # noqa: BLE001
         pass
     root = Path(series["path"])
-    index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")))
+    status0 = dict(opts.get("title_cards_status") or {})
+    recurring = set(status0.get("recurring") or []) if not reread else set()
+    index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")), recurring)
     runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
     runtime = runtimes[len(runtimes) // 2] if runtimes else None
     rt = {c: e["runtime"] for c, e in eps.items() if e.get("runtime")}
@@ -463,7 +465,8 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         if mode == "auto":
             status = {}
         else:
-            status.pop("window", None)
+            for k in ("window", "recurring", "recurring_checked"):
+                status.pop(k, None)
         ctx.log("Title cards: re-reading from the video files (cached OCR ignored).")
     scope_all = opts.get("title_cards_scope") == "all"
     done: set[str] = set()
@@ -490,7 +493,8 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         return [max(0.0, round(med - 40)), round(med + 60)]
 
     def report(f, cards, notes):
-        full = {c.get("code") for c in cards if not c.get("partial")}
+        full = {c.get("code") for c in cards if not c.get("partial")} | {
+            sg["code"] for sg in f.get("segments") or [] if sg.get("title_card")}
         looked = ", ".join(f"{_fmt_t(a)}–{_fmt_t(b)}" for a, b in f.get("title_scan") or [])
         short = len(full) < len(f.get("expected") or [1])
         where = f" (looked at {looked})" if looked and short and not any(
@@ -503,6 +507,41 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             ctx.log(f"  title card {f['rel']}: {desc}{where}" + (f" — {'; '.join(notes)}" if notes else ""))
         elif looked:
             ctx.log(f"  title card {f['rel']}: none read (looked at {looked})")
+
+    if "recurring_checked" not in status:
+        # Text from the opening titles can look like an episode title (Bluey's intro
+        # names "BINGO" in every episode, and "Bingo" is an episode). A title read in
+        # most of a sample of files whose names say otherwise is that kind of text:
+        # from then on only an exact read of it counts. Checked once per series.
+        sample = [f for f in files if f["status"] != "ERROR" and f.get("expected")][:8]
+        if len(sample) >= 3:
+            ctx.log(f"Title cards: checking {len(sample)} files for text that appears in every "
+                    "episode (opening titles)…")
+            seen: dict[str, set] = {}
+            texts: dict[str, set] = {}
+            for n, f in enumerate(sample):
+                ctx.check_cancel()
+                ctx.progress(n / len(sample), f"Title cards (opening titles): {Path(f['rel']).name}")
+                for c in run(f, None):
+                    if not c.get("partial") and c.get("code") and c["code"] not in f["expected"]:
+                        seen.setdefault(c["code"], set()).add(f["rel"])
+                        texts.setdefault(c["code"], set()).add(c["text"])
+            new = {code for code, rels in seen.items()
+                   if len(rels) >= 3 and len(rels) >= len(sample) / 2} - recurring
+            if new:
+                recurring |= new
+                index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")),
+                                             recurring)
+                status.pop("window", None)  # learned from the opening titles' position
+                for code in sorted(new):
+                    ctx.log(f"Title cards: '{sorted(texts[code])[0]}' shows in {len(seen[code])} of "
+                            f"{len(sample)} files — opening titles, not the title of {code}; "
+                            "only an exact read of that title will count from now on.")
+            hit_times.clear()
+            status["recurring"] = sorted(recurring)
+            status["recurring_checked"] = True
+            opts["title_cards_status"] = status
+            db.update_series(series["id"], options=opts)
 
     if mode == "auto" and "has_cards" not in status:
         pool = [f for f in files if f["status"] == "OK"][:6]
@@ -523,7 +562,8 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             report(f, cards, _apply_title_cards(f, cards, rt))
             done.add(f["rel"])
         has = bool(pool) and hits >= max(2, (len(pool) + 1) // 2)
-        status = {"has_cards": has, "probed": len(pool), "hits": hits}
+        status = {"has_cards": has, "probed": len(pool), "hits": hits,
+                  **{k: status[k] for k in ("recurring", "recurring_checked") if k in status}}
         if has:
             status["window"] = learn()
         opts["title_cards_status"] = status

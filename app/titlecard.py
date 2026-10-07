@@ -166,7 +166,11 @@ def _ns(t: str) -> str:
 class TitleIndex:
     """Fuzzy lookup of on-screen text against a series' episode titles."""
 
-    def __init__(self, episodes: list[dict], include_specials: bool = False):
+    def __init__(self, episodes: list[dict], include_specials: bool = False,
+                 recurring: set | list | None = None):
+        # Titles also read in a series' opening titles (Bluey's intro names "BINGO"):
+        # for these only an exact read of the title counts.
+        self.recurring = set(recurring or ())
         self.titles: list[dict] = []
         for e in episodes:
             if e["season"] == 0 and not include_specials:
@@ -226,10 +230,24 @@ class TitleIndex:
         if c not in memo:
             if len(memo) > 20000:
                 memo.clear()
-            r = self._read(text)
+            r = self._without_recurring(c, self._read(text))
             memo[c] = r and {k: v for k, v in r.items() if k != "text"}
         r = memo[c]
         return r and {**r, "text": text}
+
+    def _without_recurring(self, c: str, r: dict | None) -> dict | None:
+        """Drop matches to recurring titles unless the text is exactly that title."""
+        if not r or not self.recurring:
+            return r
+        exact = {t["code"] for t in self.titles if t["ns"] == c}
+        drop = lambda code: code in self.recurring and code not in exact  # noqa: E731
+        if not r["partial"]:
+            return None if drop(r["code"]) else r
+        cands = [x for x in r.get("candidates") or [] if not drop(x)]
+        if not cands:
+            return None
+        code = r.get("code") if r.get("code") and not drop(r["code"]) else None
+        return {**r, "candidates": cands, "code": code, "title": r.get("title") if code else None}
 
     def _read(self, text: str) -> dict | None:
         """What this on-screen text says about the episode.
@@ -319,7 +337,8 @@ class TitleIndex:
                 t = next(t for t in self.titles if t["code"] == tails[0])
                 return {"code": t["code"], "title": t["title"], "text": text,
                         "score": round(score, 3), "partial": False, "tail": True}
-        if longer and len(c) >= 6 and len(longer) <= 25:
+        # (A short read only counts when it is exactly a title: "RAIN" → "Rain" or "Rainbow".)
+        if longer and (len(c) >= 6 or (full and score >= 0.999)) and len(longer) <= 25:
             cands = ([top["code"]] if full else []) + [t["code"] for t in longer]
             return {"code": top["code"] if full else None, "title": top["title"] if full else None,
                     "text": text, "score": round(score, 3), "partial": True,
