@@ -668,6 +668,10 @@ async function tabOptions() {
     <div class="field"><label>Check</label>
       <select name="title_cards_scope">${[["unconfirmed", "Only files the dialogue match didn't confirm"], ["all", "Every file (slower)"]].map(([v, t]) =>
         `<option value="${v}" ${(o.title_cards_scope || "unconfirmed") === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+    <div class="field"><label>Trust title cards</label>
+      <input type="checkbox" name="title_cards_trust" ${o.title_cards_trust === false ? "" : "checked"}>
+      <div class="hint">When the dialogue can't tell, a clearly read title card (complete title, seen on 2+ frames)
+        decides — even against the filename. Strong dialogue disagreeing with the card still goes to review.</div></div>
     <div class="row"><div class="small muted" style="flex:1">Title-card OCR is cached, so rescans normally reuse it. Use this after an update that changes how cards are read, or if a card was misread.</div>
       <button class="btn small" type="button" id="reread-cards">Rescan, re-reading title cards</button></div>
     </fieldset>
@@ -698,7 +702,8 @@ async function tabOptions() {
         name_in_files: f.name_in_files.value.trim(), imdb_id: f.imdb_id.value.trim(),
         include_specials: f.include_specials.checked, fandom_wiki: f.fandom_wiki.value.trim(),
         fandom_page_pattern: f.fandom_page_pattern.value.trim(), fandom_title_overrides: ov,
-        title_cards: f.title_cards.value, title_cards_scope: f.title_cards_scope.value } });
+        title_cards: f.title_cards.value, title_cards_scope: f.title_cards_scope.value,
+        title_cards_trust: f.title_cards_trust.checked } });
       toast("Saved");
     } catch (err) { fail(err); }
   };

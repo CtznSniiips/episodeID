@@ -170,6 +170,7 @@ def job_scan(ctx, params):
                 ctx.log(f"{'':<16}   {sg['code']}? {sg['why']}")
 
     _titlecard_pass(series, files, eps, ctx, reread=bool(params.get("reread_cards")))
+    _title_card_swaps(files, ctx)
 
     if llm.available():
         _llm_pass(series, files, eps, refs, ctx)
@@ -248,11 +249,18 @@ def _resolve_partial(c: dict, sg: dict | None, expected: list[str]) -> str | Non
     return None
 
 
-def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None) -> list[str]:
+def _clear_card(c: dict) -> bool:
+    """A complete read of a title seen on at least two frames — not a glimpse or a
+    card still animating in. Trusted over the filename when the dialogue is unclear."""
+    return not c.get("partial") and bool(c.get("code")) and int(c.get("frames") or 1) >= 2
+
+
+def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None,
+                       trust: bool = False) -> list[str]:
     """Merge title-card evidence into a scanned file's segments. Returns log notes.
     runtimes: episode code → minutes (TVDB), used to judge whether a stretch of
     weak dialogue fits inside a card-confirmed episode."""
-    keep = ("code", "title", "text", "score", "time", "partial", "candidates")
+    keep = ("code", "title", "text", "score", "time", "partial", "candidates", "frames")
     f["title_cards"] = [{k: c.get(k) for k in keep} for c in cards]
     if not cards:
         return []
@@ -309,7 +317,8 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
                 prev = max([j for j, x in enumerate(segs) if x["end"] <= c["time"]] or [-1])
                 lo = segs[prev]["end"] if prev >= 0 else 0.0
                 hi = segs[prev + 1]["start"] if prev + 1 < len(segs) else dur
-                ok = c["code"] in expected or not expected or set(expected) <= confirmed
+                ok = c["code"] in expected or not expected or set(expected) <= confirmed \
+                    or (trust and _clear_card(c))
                 new = {"start": lo, "end": hi, "code": c["code"], "score": c["score"],
                        "margin": 0, "alternatives": [], "title_card": c,
                        "confidence": "high" if ok else "conflict",
@@ -368,6 +377,14 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
                                  f"(check the reference for {old})")
                 sg.update(dialogue_code=old, code=c["code"], confidence="high",
                           evidence="title+filename", why=why)
+            elif sg.get("confidence") != "high" and trust and _clear_card(c) \
+                    and c["code"] not in alts and expected and not set(expected) <= confirmed:
+                # The card decides: the dialogue is unclear and a clear card beats the name.
+                sg.update(dialogue_code=old, code=c["code"], confidence="high", evidence="title",
+                          why=f"title card '{c['text']}' ({c['code']}); the filename says "
+                              f"{', '.join(expected)} and the dialogue is unclear ({old or '—'})")
+                notes.append(f"title card '{c['text']}' says {c['code']}, not {', '.join(expected)} "
+                             "(dialogue unclear)")
             elif sg.get("confidence") != "high" and (c["code"] in alts or not expected
                                                      or set(expected) <= confirmed):
                 # Weak dialogue, and the card either is one of its runner-up matches or names
@@ -434,6 +451,43 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None)
     return notes
 
 
+def _title_card_swaps(files: list[dict], ctx) -> None:
+    """Two files whose title cards each name the other's episode have been swapped.
+    One card contradicting its filename isn't trusted on its own (a misread would
+    rename a good file), but two that point at each other are."""
+    def conflict(f):
+        segs = f.get("segments") or []
+        if len(segs) != 1 or len(f.get("expected") or []) != 1:
+            return None
+        return segs[0].get("title_conflict") if segs[0].get("confidence") == "conflict" else None
+
+    by_name = {}
+    for f in files:
+        if conflict(f):
+            by_name.setdefault(f["expected"][0], []).append(f)
+    done = set()
+    for f in files:
+        other_code = conflict(f)
+        if not other_code or f["rel"] in done:
+            continue
+        partners = [g for g in by_name.get(other_code, [])
+                    if g["rel"] not in done and conflict(g) == f["expected"][0]]
+        if len(partners) != 1:
+            continue  # none, or ambiguous (several files claim the same pair)
+        g = partners[0]
+        for a, b in ((f, g), (g, f)):
+            sg = a["segments"][0]
+            sg.update(code=sg["title_conflict"], confidence="high", evidence="title (swap)",
+                      dialogue_code=sg.get("dialogue_code") or sg.get("code"),
+                      why=f"the title cards in this file and in {Path(b['rel']).name} each name "
+                          "the other's episode — the two files are swapped")
+            sg.pop("title_conflict", None)
+            a["status"], _ = classify(a["expected"], a["segments"], a.get("text_source") or "none")
+            a["note"] = f"swapped with {Path(b['rel']).name} (title cards)"
+            done.add(a["rel"])
+        ctx.log(f"Title cards: {f['rel']} and {g['rel']} each show the other's title — swapped.")
+
+
 def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: bool = False) -> None:
     s = get_settings()
     opts = dict(series.get("options") or {})
@@ -472,6 +526,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
                 status.pop(k, None)
         ctx.log("Title cards: re-reading from the video files (cached OCR ignored).")
     scope_all = opts.get("title_cards_scope") == "all"
+    trust = opts.get("title_cards_trust", True) is not False
     done: set[str] = set()
     hit_times: list[float] = []
 
@@ -580,7 +635,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             # readable episode title counts as "this show has title cards".
             if cards and (f["status"] != "OK" or any(c["code"] in confirmed for c in cards)):
                 hits += 1
-            report(f, cards, _apply_title_cards(f, cards, rt))
+            report(f, cards, _apply_title_cards(f, cards, rt, trust))
             done.add(f["rel"])
         has = bool(pool) and hits >= max(2, (len(pool) + 1) // 2)
         status = {"has_cards": has, "probed": len(pool), "hits": hits,
@@ -614,7 +669,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         cards = run(f, learn())
         if not cards and use_vision:
             cards = _vision_card(root / f["rel"], f, index, series["name"], ctx)
-        report(f, cards, _apply_title_cards(f, cards, rt))
+        report(f, cards, _apply_title_cards(f, cards, rt, trust))
     if titlecard._accel.get("ocr_gpu_error") and not titlecard._accel.get("gpu_error_logged"):
         titlecard._accel["gpu_error_logged"] = True
         ctx.log(f"Title cards: GPU OCR failed, using the CPU instead — {titlecard._accel['ocr_gpu_error']}")

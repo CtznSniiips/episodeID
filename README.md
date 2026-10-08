@@ -36,7 +36,10 @@ subtitles, references or anyone's episode numbering:
   and whether to check every file or only those the dialogue match didn't confirm.
 - Title card agrees with the dialogue → confirmed. Title card **and** filename agree but
   the dialogue doesn't → the file is left alone and the log names the reference to check.
-  Weak dialogue → the title card decides. Strong dialogue disagreeing with both → review.
+  Weak dialogue → the title card decides, even against the filename, when it's a clear read
+  (complete title, 2+ frames; *Series options → Trust title cards*, on by default). Strong
+  dialogue disagreeing with the card → review. Two files whose cards name each other's
+  episode are a confirmed swap.
 - Files with no subtitles and no transcript can be identified from their cards alone,
   including two-episode files with two cards.
 - Optional: send hard-to-read cards to a vision-capable model on the AI endpoint

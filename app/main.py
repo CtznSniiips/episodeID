@@ -371,7 +371,8 @@ def series_options(sid: int, body: dict):
     s = db.get_series(sid) or _404()
     opts = dict(s["options"] or {})
     for k in ("fandom_wiki", "fandom_page_pattern", "fandom_title_overrides",
-              "include_specials", "name_in_files", "title_cards", "title_cards_scope"):
+              "include_specials", "name_in_files", "title_cards", "title_cards_scope",
+              "title_cards_trust"):
         if k in body:
             opts[k] = body[k]
     if "fandom_wiki" in body:

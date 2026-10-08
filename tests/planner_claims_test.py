@@ -113,4 +113,35 @@ assert planner.episode_filename("Show", two, ".mkv", "", dict(st, multi_episode_
     "Show - S01E01-E02 - The Quest.mkv"
 assert planner.episode_filename("Show", [{"season": 1, "episode": 3, "title": "Who's Afraid?"}], ".mkv", "", st) == \
     "Show - S01E03 - Who's Afraid.mkv"
+# Two files whose title cards each name the other's episode (Thomas S04E09/S04E10):
+# a confirmed swap, both renames pre-ticked — not a rename plus an aside.
+from app import pipeline  # noqa: E402
+from app.jobs import JobContext  # noqa: E402,F401
+T = root.parent / "Thomas"
+(T / "Season 4").mkdir(parents=True, exist_ok=True)
+A = "Season 4/Thomas the Tank Engine & Friends - S04E09 - Home at Last DVD.mkv"
+B = "Season 4/Thomas the Tank Engine & Friends - S04E10 - Rock 'n' Roll DVD.mkv"
+for rel in (A, B):
+    (T / rel).touch()
+tseries = {"path": str(T), "tvdb_id": 999997, "options": {"name_in_files": "Thomas the Tank Engine & Friends"},
+           "episodes": [{"season": 4, "episode": 9, "title": "Home at Last"},
+                        {"season": 4, "episode": 10, "title": "Rock 'n' Roll"}]}
+def conflict_file(rel, exp, card, dlg):
+    return {"rel": rel, "expected": [exp], "status": "LOW_CONFIDENCE", "duration": 333, "text_source": "whisper small",
+            "segments": [{"start": 0, "end": 333, "code": dlg, "score": .1, "confidence": "conflict",
+                          "title_conflict": card, "title_card": {"code": card, "text": "x"}, "alternatives": []}]}
+files = [conflict_file(A, "S04E09", "S04E10", "S02E09"), conflict_file(B, "S04E10", "S04E09", "S02E07")]
+files[0]["segments"][0]["llm"] = {"code": "S04E10", "confidence": 1.0}
+class _Ctx:
+    def log(self, m): print("  log:", m)
+pipeline._title_card_swaps(files, _Ctx())
+by = {it["source"]: it for it in planner.build_plan(tseries, {"files": files})}
+for rel in (A, B):
+    it = by[rel]
+    print(f"  {it['kind']:7} sel={it['selected']} {rel.split(' - ')[1]} -> {[t['path'].split(' - ')[1] for t in it.get('targets', [])]}")
+    assert it["kind"] == "rename" and it["selected"] and not it.get("ai"), it
+# A lone contradicting card is still not enough on its own.
+lone = [conflict_file(A, "S04E09", "S04E10", "S02E09")]
+pipeline._title_card_swaps(lone, _Ctx())
+assert lone[0]["segments"][0]["confidence"] == "conflict"
 print("PASS")

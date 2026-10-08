@@ -87,6 +87,20 @@ pipeline._apply_title_cards(f, [{**idx.read("SAVEA ROCKET ROLLERSKATER"), "time"
 assert f["segments"][0]["confidence"] == "conflict" and f["status"] == "LOW_CONFIDENCE", f["segments"]
 print("  lone card contradicting filename + weak dialogue → review")
 
+# "Trust title cards" (series option, on by default in scans): a clear card decides.
+def lone(frames, conf="low", trust=True):
+    f = {"expected": ["S07E24"], "text_source": "embedded",
+         "segments": [{"start": 0, "end": 690, "code": "S01E42", "score": .08, "confidence": conf, "alternatives": []}]}
+    pipeline._apply_title_cards(f, [{**idx.read("SAVEA ROCKET ROLLERSKATER"), "time": 40.0, "frames": frames}],
+                                None, trust)
+    return f
+f = lone(3); assert f["segments"][0]["code"] == "S07E23" and f["segments"][0]["confidence"] == "high", f
+assert f["status"] == "MISMATCH", f
+assert lone(1)["segments"][0]["confidence"] == "conflict"            # a one-frame glimpse isn't enough
+assert lone(3, conf="high")["segments"][0]["confidence"] == "conflict"  # strong dialogue still disagrees
+assert lone(3, trust=False)["segments"][0]["confidence"] == "conflict"  # option off: as before
+print("  trusted clear card decides when the dialogue is unclear; glimpses and strong dialogue don't change")
+
 # Cached OCR from an older version that stopped reading too early must not be reused.
 L = lambda txt: [[txt, 0.95, 0.08, 0.4]]
 partial_frames = [{"t": 20.0 + i, "lines": L("PUPS SAVETHE BABY")} for i in range(7)]
