@@ -22,7 +22,7 @@ Works out which episode each video file **really** contains by reading its dialo
 3. **Your files' dialogue** comes from a sidecar `.srt/.ass/.vtt`, else an embedded text subtitle track, else **Whisper** (faster-whisper; also covers image-based PGS/VobSub subs). Results are cached, and survive renames.
 4. **Matching**: the dialogue is cut into 90 s windows (every 45 s), each scored against every reference with TF-IDF cosine similarity. A Viterbi pass picks one episode per window with a switching penalty, giving clean segments, so two-episode files and swapped halves are detected. Each segment is re-scored as a whole for its confidence.
 5. **AI fallback (optional)**: any OpenAI-compatible endpoint (Ollama `/v1`, OpenAI, LM Studio, vLLM, OpenRouter…). Only consulted for files the matcher couldn't settle, choosing among ≤12 unclaimed candidates using TVDB summaries. Its picks are marked **AI** and are never ticked for apply automatically.
-6. **Plan → Apply → Undo**: the plan is shown as a table you can tick, untick and correct (*Set episode…*). Apply requires typing `APPLY`.
+6. **Plan → Apply → Undo**: the plan is shown as a table you can tick, untick and correct (*Set episode…*). Apply requires typing `APPLY`. Above the plan, *Episodes after applying* shows how many aired episodes will have a file once the ticked changes are applied — which would be lost, gained, still missing, or end up with two files — and updates as you tick and untick.
 
 ### Title cards
 

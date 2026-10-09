@@ -427,6 +427,7 @@ async function tabPlan(reload = true) {
       <span class="muted small">Plan #${plan.id} · ${esc(when(plan.created))}${applied ? " · <b>applied</b>" : ""}</span>
       ${applied ? "" : `<button class="btn primary" id="apply" ${selCount ? "" : "disabled"}>Apply ${selCount} change${selCount === 1 ? "" : "s"}…</button>`}
     </div>
+    ${applied ? "" : coverageHtml(plan, state.series)}
     ${shown.length ? `<table><thead><tr>
       <th class="check">${applied ? "" : `<input type="checkbox" id="all-sel" title="Select all">`}</th>
       <th>File → result</th><th>Detected in the file</th><th style="width:150px"></th></tr></thead><tbody>
@@ -434,6 +435,8 @@ async function tabPlan(reload = true) {
       `<div class="empty">Nothing here.</div>`}`;
 
   $$(".filters .btn", tab).forEach((b) => b.onclick = () => { state.filter = b.dataset.f; tabPlan(false); });
+  const cov = $("#coverage", tab);
+  if (cov) cov.ontoggle = () => { state.coverageOpen = cov.open; };
   $$("input.sel", tab).forEach((cb) => cb.onchange = async () => {
     await api(`/api/plans/${plan.id}/selection`, { method: "PATCH",
       body: { selected: { [cb.dataset.id]: cb.checked } } }).catch(fail);
@@ -458,6 +461,68 @@ async function tabPlan(reload = true) {
   });
   const ap = $("#apply", tab);
   if (ap) ap.onclick = () => confirmApply(plan, actionable.filter((it) => it.selected));
+}
+
+// Which episodes have a file now, and which will after applying the ticked changes.
+function coverage(plan, series) {
+  const today = new Date().toISOString().slice(0, 10);
+  const withSpecials = !!(series.options || {}).include_specials;
+  const all = (series.episodes || []).filter((e) => e.season > 0 || withSpecials);
+  const dated = all.some((e) => e.aired);  // no dates at all (older data): count everything
+  const aired = all.filter((e) => !dated || (e.aired && e.aired <= today));
+  const now = new Map(), after = new Map();
+  const add = (m, code, src) => { if (!m.has(code)) m.set(code, []); m.get(code).push(src); };
+  for (const it of plan.items) {
+    (it.expected || []).forEach((c) => add(now, c, it.source));
+    const acting = it.selected && ["rename", "split", "aside"].includes(it.kind);
+    if (!acting) { (it.expected || []).forEach((c) => add(after, c, it.source)); continue; }
+    for (const t of it.targets || []) {
+      if (t.duplicate) continue;
+      (t.codes || []).forEach((c) => add(after, c, t.path));
+    }
+  }
+  const codes = new Set(aired.map((e) => e.code));
+  return {
+    aired,
+    nowHave: aired.filter((e) => now.has(e.code)).length,
+    afterHave: aired.filter((e) => after.has(e.code)).length,
+    lost: aired.filter((e) => now.has(e.code) && !after.has(e.code)),
+    gained: aired.filter((e) => !now.has(e.code) && after.has(e.code)),
+    missing: aired.filter((e) => !now.has(e.code) && !after.has(e.code)),
+    doubled: [...after.entries()].filter(([c, files]) => codes.has(c) && files.length > 1)
+      .map(([c, files]) => ({ ep: aired.find((e) => e.code === c), files })),
+  };
+}
+
+function coverageHtml(plan, series) {
+  const c = coverage(plan, series);
+  if (!c.aired.length) return "";
+  const list = (eps) => {
+    const bySeason = {};
+    eps.forEach((e) => (bySeason[e.season] = bySeason[e.season] || []).push(e));
+    return Object.entries(bySeason).map(([s, es]) =>
+      `<div class="small" style="margin:2px 0"><b>${+s === 0 ? "Specials" : `Season ${s}`}:</b> ${es.map((e) =>
+        `<span class="mono">${esc(e.code)}</span> ${esc(e.title || "")}`).join(" · ")}</div>`).join("");
+  };
+  const diff = c.afterHave - c.nowHave;
+  const sec = (cls, title, eps, note = "") => eps.length ? `<div style="margin-top:8px">
+    <span class="badge ${cls}">${title} (${eps.length})</span>${note ? ` <span class="muted small">${note}</span>` : ""}${list(eps)}</div>` : "";
+  return `<details class="card" id="coverage" style="margin-bottom:12px" ${state.coverageOpen ? "open" : ""}>
+    <summary style="cursor:pointer"><b>Episodes after applying:</b> ${c.afterHave} of ${c.aired.length} aired episodes have a file
+      <span class="muted small">(now ${c.nowHave}${diff ? `, ${diff > 0 ? "+" : ""}${diff}` : ""})</span>
+      ${c.lost.length ? ` <span class="badge b-bad">${c.lost.length} lost</span>` : ""}
+      ${c.gained.length ? ` <span class="badge b-ok">${c.gained.length} gained</span>` : ""}
+      ${c.missing.length ? ` <span class="badge">${c.missing.length} missing</span>` : ""}
+      ${c.doubled.length ? ` <span class="badge b-warn">${c.doubled.length} doubled</span>` : ""}</summary>
+    <div class="muted small" style="margin-top:6px">Worked out from the ticked changes — tick or untick rows to see the effect.
+      Episodes that haven't aired yet${(series.options || {}).include_specials ? "" : " and specials"} aren't counted.</div>
+    ${sec("b-bad", "Lost by this plan", c.lost, "have a file now but won't after applying — check these")}
+    ${sec("b-ok", "Gained", c.gained)}
+    ${sec("", "Still missing", c.missing, "no file before or after")}
+    ${c.doubled.length ? `<div style="margin-top:8px"><span class="badge b-warn">Two or more files (${c.doubled.length})</span>
+      ${c.doubled.map((d) => `<div class="small" style="margin:2px 0"><span class="mono">${esc(d.ep.code)}</span> ${esc(d.ep.title || "")}:
+        ${d.files.map((f) => `<span class="path">${esc(f)}</span>`).join(", ")}</div>`).join("")}</div>` : ""}
+  </details>`;
 }
 
 function rowHtml(it, eps, applied) {
