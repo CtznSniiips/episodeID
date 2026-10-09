@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import db, fandom, llm, titlecard, tvdb
 from .config import get_settings
-from .executor import apply_plan, sonarr_rescan, undo_apply
+from .executor import apply_plan, migrate_legacy_backup, sonarr_rescan, undo_apply
 from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import get_dialogue
@@ -135,6 +135,10 @@ def job_scan(ctx, params):
     if matcher is None:
         ctx.log("No references yet — every file will need the AI fallback or a manual decision.")
 
+    try:
+        migrate_legacy_backup(series, ctx)
+    except Exception as e:  # noqa: BLE001 — never block a scan on this
+        ctx.log(f"Couldn't move the old backup folder out of the series: {e}")
     videos = list_videos(root, s["backup_folder"])
     if params.get("only"):
         only = set(params["only"])

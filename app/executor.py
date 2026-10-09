@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import db
 from .config import get_settings
-from .planner import sidecars
+from .planner import backup_folder_name, backup_rel, backup_root, sidecars
 from .media_text import SUB_EXTS
 
 
@@ -130,8 +130,12 @@ def _move(src: Path, dst: Path, log: _Log, root: Path, note: str = "") -> None:
         raise ApplyError(f"Refusing to overwrite {dst}")
     dst.parent.mkdir(parents=True, exist_ok=True)
     os.rename(src, dst) if _same_fs(src, dst.parent) else shutil.move(str(src), str(dst))
-    log.add({"op": "move", "src": str(src.relative_to(root)), "dst": str(dst.relative_to(root)),
-             "note": note})
+    log.add({"op": "move", "src": _rel(src, root), "dst": _rel(dst, root), "note": note})
+
+
+def _rel(p: Path, root: Path) -> str:
+    """Path relative to the series folder; the backup folder sits beside it ("../…")."""
+    return os.path.relpath(p, root)
 
 
 def _same_fs(a: Path, b: Path) -> bool:
@@ -158,11 +162,16 @@ def _sidecar_dst(side: Path, old_video: Path, new_video: Path) -> Path:
 
 
 def apply_plan(series: dict, plan: dict, ctx) -> dict:
-    s = get_settings()
     root = Path(series["path"])
-    backup = root / s["backup_folder"]
+    migrate_legacy_backup(series, ctx)
+    backup = backup_root(root)
+    legacy, new = backup_folder_name() + "/", backup_rel(root) + "/"
     items = [it for it in plan["items"] if it.get("selected") and
              it["kind"] in ("rename", "split", "aside")]
+    for it in items:  # plans made before the backup folder moved out of the series
+        for t in it.get("targets") or []:
+            if legacy != new and t["path"].startswith(legacy):
+                t["path"] = new + t["path"][len(legacy):]
     if not items:
         return {"applied": 0}
 
@@ -173,7 +182,7 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
             raise ApplyError(f"Source no longer exists: {it['source']} — rescan first.")
         for t in it.get("targets") or []:
             p = (root / t["path"]).resolve()
-            if root.resolve() not in p.parents:
+            if root.resolve() not in p.parents and backup.resolve() not in p.parents:
                 raise ApplyError(f"Target escapes the series folder: {t['path']}")
 
     apply_id = db.add_apply(series["id"], plan["id"], [])
@@ -205,7 +214,7 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
             start = cuts[i]
             dur = (cuts[i + 1] - start) if cuts[i + 1] is not None else None
             _ffmpeg_copy(src, tmp, start, dur)
-            log.add({"op": "create", "dst": str(tmp.relative_to(root)),
+            log.add({"op": "create", "dst": _rel(tmp, root),
                      "note": f"split piece of {it['source']}"})
             pending.append((tmp, final, f"split {t['codes'][0]}"))
         dst = _free(backup / "split_originals" / it["source"])
@@ -257,10 +266,10 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
 # ---------------------------------------------------------------------- undo
 
 def undo_apply(series: dict, apply: dict, ctx) -> dict:
-    s = get_settings()
     root = Path(series["path"])
-    backup = root / s["backup_folder"]
-    ops = apply["log"]
+    migrate_legacy_backup(series, ctx)
+    backup = backup_root(root)
+    ops = db.get_apply(apply["id"])["log"]  # re-read: migration may have updated the paths
     restored, parked, problems = 0, 0, []
     for op in reversed(ops):
         ctx.check_cancel()
@@ -290,23 +299,59 @@ def undo_apply(series: dict, apply: dict, ctx) -> dict:
         ctx.log(f"  ! {p}")
     db.mark_undone(apply["id"])
     ctx.log(f"Restored {restored} moves; {parked} generated files parked in "
-            f"{s['backup_folder']}/undone.")
+            f"{_rel(backup / 'undone', root)}.")
     return {"restored": restored, "parked": parked, "problems": problems}
 
 
 # -------------------------------------------------------------------- backup
 
 def backup_dir(series: dict) -> Path:
-    """The series' backup folder. Refuses settings that would point anywhere but a
-    plain subfolder of the series (empty, ".", "..", nested paths)."""
-    name = (get_settings()["backup_folder"] or "").strip()
-    if not name or name in (".", "..") or "/" in name or "\\" in name:
-        raise ValueError(f"Backup folder setting {name!r} isn't a plain folder name")
+    """The series' backup folder (see planner.backup_root). Refuses anything that
+    isn't a plain folder of its own: never the series folder or the TV folder."""
     root = Path(series["path"]).resolve()
-    d = root / name
-    if d.is_symlink() or (d.exists() and d.resolve().parent != root):
-        raise ValueError(f"{d} isn't a folder inside the series")
+    d = backup_root(root)
+    if d.is_symlink() or d in (root, root.parent) or d.resolve() in (root, root.parent):
+        raise ValueError(f"{d} isn't a backup folder of its own")
     return d
+
+
+def migrate_legacy_backup(series: dict, ctx=None) -> int:
+    """Move a backup folder from inside the series (where Sonarr sees it) to its place
+    beside the series, and update the History so Undo still finds every file."""
+    root = Path(series["path"]).resolve()
+    old, new = root / backup_folder_name(), backup_root(root)
+    if old == new or not old.is_dir() or old.is_symlink():
+        return 0
+    moved = 0
+    for f in list(_walk_files(old)):
+        dst = _free(new / f.relative_to(old))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(f, dst) if _same_fs(f, dst.parent) else shutil.move(str(f), str(dst))
+        moved += 1
+    for dirpath, _d, _f in sorted(os.walk(old, followlinks=False), key=lambda w: -len(w[0])):
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+    a, b = backup_folder_name() + "/", os.path.relpath(new, root) + "/"
+    for ap in db.list_applies(series["id"]):
+        full = db.get_apply(ap["id"])
+        changed = False
+        for op in full["log"]:
+            for k in ("src", "dst"):
+                if isinstance(op.get(k), str) and op[k].startswith(a):
+                    op[k], changed = b + op[k][len(a):], True
+        if changed:
+            db.update_apply_log(ap["id"], full["log"])
+    msg = (f"Moved {moved} backed-up files from {old.name}/ inside the series to "
+           f"{os.path.relpath(new, root.parent)}/ beside it, so Sonarr doesn't see them.")
+    (ctx.log if ctx else log_info)(msg)
+    return moved
+
+
+def log_info(msg: str) -> None:
+    import logging
+    logging.getLogger("episodeid").info(msg)
 
 
 def _walk_files(d: Path):
@@ -316,6 +361,7 @@ def _walk_files(d: Path):
 
 
 def backup_summary(series: dict) -> dict:
+    migrate_legacy_backup(series)
     d = backup_dir(series)
     buckets: dict[str, dict] = {}
     if d.is_dir():
@@ -329,12 +375,15 @@ def backup_summary(series: dict) -> dict:
             except OSError:
                 pass
     out = sorted(buckets.values(), key=lambda b: b["name"])
-    return {"folder": d.name, "buckets": out, "files": sum(b["files"] for b in out),
+    from .config import MEDIA_ROOT
+    shown = os.path.relpath(d, MEDIA_ROOT) if MEDIA_ROOT in d.parents else d.name
+    return {"folder": shown, "buckets": out, "files": sum(b["files"] for b in out),
             "bytes": sum(b["bytes"] for b in out)}
 
 
 def delete_backup(series: dict, buckets: list[str]) -> dict:
     """Permanently delete the backed-up files in the chosen subfolders."""
+    migrate_legacy_backup(series)
     d = backup_dir(series)
     if not d.is_dir():
         return {"deleted": 0, "bytes": 0, "errors": []}

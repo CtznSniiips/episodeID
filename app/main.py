@@ -36,6 +36,14 @@ def _startup():
     from .references import warm_reference_cache
     threading.Thread(target=warm_reference_cache, name="warm-refs", daemon=True).start()
 
+    def _move_old_backups():
+        for sr in db.list_series():
+            try:
+                executor.migrate_legacy_backup(db.get_series(sr["id"]))
+            except Exception as e:  # noqa: BLE001
+                log.warning("series %s: couldn't move its backup folder: %s", sr.get("id"), e)
+    threading.Thread(target=_move_old_backups, name="move-backups", daemon=True).start()
+
 
 def _404(what="Not found"):
     raise HTTPException(404, what)

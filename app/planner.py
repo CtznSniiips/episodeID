@@ -17,7 +17,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .config import get_settings
+import os
+
+from .config import MEDIA_ROOT, get_settings
 from .media_text import SUB_EXTS, VIDEO_EXTS
 from .references import describe_conflict, ref_meta
 
@@ -168,6 +170,29 @@ def season_dir(root: Path, season: int, settings: dict, layout: dict) -> Path:
     return root / settings["season_folder_format"].format(season=season)
 
 
+def backup_folder_name() -> str:
+    name = (get_settings()["backup_folder"] or "").strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise ValueError(f"Backup folder setting {name!r} isn't a plain folder name")
+    return name
+
+
+def backup_root(series_path: str | Path) -> Path:
+    """Where a series' displaced files go: next to the series, not inside it —
+    <TV folder>/_episodeid_backup/<Show>/ — so Sonarr never sees them. A series folder
+    sitting directly in the media mount has nowhere above it: then <Show>/_episodeid_backup."""
+    root = Path(series_path).resolve()
+    parent = root.parent
+    if parent == MEDIA_ROOT or MEDIA_ROOT in parent.parents:
+        return parent / backup_folder_name() / root.name
+    return root / backup_folder_name()
+
+
+def backup_rel(series_path: str | Path) -> str:
+    """The backup root as a path relative to the series folder (plan targets, logs)."""
+    return os.path.relpath(backup_root(series_path), Path(series_path).resolve())
+
+
 def detect_layout(root: Path, backup_name: str) -> dict:
     season_dirs: dict[int, Path] = {}
     for d in root.iterdir():
@@ -228,8 +253,8 @@ def _segment_choice(seg: dict) -> tuple[str | None, str, bool]:
 def build_plan(series: dict, scan: dict) -> list[dict]:
     s = get_settings()
     root = Path(series["path"])
-    backup = s["backup_folder"]
-    layout = detect_layout(root, backup)
+    backup = backup_rel(root)
+    layout = detect_layout(root, s["backup_folder"])
     eps = {f"S{e['season']:02d}E{e['episode']:02d}": e for e in series["episodes"]}
     series_name = (series.get("options") or {}).get("name_in_files") or root.name
 

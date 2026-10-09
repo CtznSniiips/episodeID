@@ -528,7 +528,7 @@ function coverageHtml(plan, series) {
 function rowHtml(it, eps, applied) {
   const actionable = ["rename", "split", "aside"].includes(it.kind);
   const targets = (it.targets || []).map((t) =>
-    `<div class="arrow">↳ <span class="path">${esc(t.path)}</span>${t.duplicate ? ' <span class="badge b-bad">duplicate</span>' : ""}</div>`).join("");
+    `<div class="arrow">↳ <span class="path">${esc(t.path.replace(/^(\.\.\/)+/, ""))}</span>${t.duplicate ? ' <span class="badge b-bad">duplicate</span>' : ""}</div>`).join("");
   const segs = (it.segments || []).map((sg) => segHtml(sg, eps)).join("<br>") ||
     `<span class="muted small">${esc(it.text_source === "none" ? "no subtitles / transcript" : "no match")}</span>`;
   const src = it.text_source && it.text_source !== "none" ?
@@ -751,7 +751,8 @@ async function tabOptions() {
     </fieldset>
     <fieldset><legend>Backup folder</legend>
       <div class="hint" style="margin-bottom:8px">Files EpisodeID moved out of the way (duplicates, unverified files,
-        originals of split files, old metadata…). Nothing is ever deleted unless you do it here.</div>
+        originals of split files, old metadata…). Kept beside the series folder, not in it, so Sonarr doesn't see
+        them. Nothing is ever deleted unless you do it here.</div>
       <div id="bk"><span class="muted small">Loading…</span></div>
     </fieldset>
     <div class="row"><button class="btn danger" type="button" id="del">Remove series from EpisodeID</button>
