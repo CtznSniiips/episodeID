@@ -156,6 +156,11 @@ def latest_scan(series_id: int) -> dict | None:
     return _row(r, ("results",))
 
 
+def get_scan(scan_id: int) -> dict | None:
+    r = conn().execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    return _row(r, ("results",))
+
+
 def latest_scan_summary(series_id: int) -> dict | None:
     """Created time and status counts of the latest scan, without loading its results."""
     r = conn().execute(

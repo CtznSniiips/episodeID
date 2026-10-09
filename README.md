@@ -62,6 +62,7 @@ subtitles, references or anyone's episode numbering:
 - Renames go through temporary names in two passes, so swaps and rotations are safe.
 - Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap between episodes.
 - Undo works newest-first and restores every move; split pieces are parked in `undone/`.
+- After an apply the plan updates itself — renamed files show as correct under their new names, split pieces as files of their own — so what's left (unticked changes, reviews) is all that remains. No rescan needed; an undo puts the plan back too.
 - All paths are confined to the mounted media folder.
 
 ## Running

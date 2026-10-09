@@ -760,6 +760,100 @@ def job_replan(ctx, params):
     return {"plan_id": plan_id}
 
 
+def _plan_after_apply(series: dict, plan: dict, ctx) -> int | None:
+    """Carry the scan behind an applied plan forward to the files as they are now —
+    renamed files under their new names, split pieces as files of their own, files
+    moved to the backup folder gone — and make a new plan from it: what's left
+    (unticked changes, reviews) plus the renamed files, now correct. No rescan needed:
+    what each file contains was already worked out."""
+    scan = db.get_scan(plan["scan_id"]) if plan.get("scan_id") else None
+    if not scan:
+        return None
+    root = Path(series["path"])
+    done = {it["source"]: it for it in plan["items"]
+            if it.get("selected") and it["kind"] in ("rename", "split", "aside")}
+    opts = dict(series.get("options") or {})
+    overrides = dict(opts.get("overrides") or {})
+    files = []
+    for f in scan["results"]["files"]:
+        it = done.get(f["rel"])
+        if not it:
+            if (root / f["rel"]).exists():
+                files.append(f)
+            continue
+        ov = overrides.get(f["rel"])  # kept under the old name too, for Undo
+        if it["kind"] == "aside":
+            continue
+        if it["kind"] == "rename":
+            t = it["targets"][0]
+            g = {**f, "rel": t["path"], "expected": list(t.get("codes") or it.get("codes") or []),
+                 "renamed_from": f["rel"]}
+            if ov:
+                overrides[t["path"]] = ov
+            files.append(_reclassified(g, root))
+            continue
+        for t in it["targets"]:  # split
+            if t.get("duplicate"):
+                continue
+            a, b = float(t.get("start") or 0), float(t.get("end") or 0)
+            segs = [{**sg, "start": max(0.0, float(sg.get("start", 0)) - a),
+                     "end": min(b, float(sg.get("end", 0))) - a}
+                    for sg in f.get("segments") or [] if sg.get("code") in (t.get("codes") or [])
+                    or (sg.get("llm") or {}).get("code") in (t.get("codes") or [])
+                    or sg.get("override") in (t.get("codes") or [])]
+            g = {**f, "rel": t["path"], "expected": list(t.get("codes") or []), "segments": segs[:1],
+                 "duration": round(b - a, 1) if b > a else f.get("duration"), "split_from": f["rel"],
+                 "title_cards": [c for c in f.get("title_cards") or [] if a - 60 <= c.get("time", 0) <= b]}
+            if ov:
+                overrides[t["path"]] = list(t.get("codes") or [])
+            files.append(_reclassified(g, root))
+    opts["overrides"] = overrides
+    db.update_series(series["id"], options=opts)
+    counts: dict[str, int] = {}
+    for f in files:
+        counts[f["status"]] = counts.get(f["status"], 0) + 1
+    scan_id = db.add_scan(series["id"], {**scan["results"], "files": files, "counts": counts,
+                                         "after_apply": plan["id"]})
+    items = build_plan(db.get_series(series["id"]), db.get_scan(scan_id)["results"])
+    plan_id = db.add_plan(series["id"], scan_id, items)
+    left = sum(1 for i in items if i["kind"] in ("rename", "split", "aside"))
+    review = sum(1 for i in items if i["kind"] == "review")
+    ctx.log(f"Plan updated: {left} change{'s' if left != 1 else ''} left, {review} to review.")
+    return plan_id
+
+
+def _reclassified(f: dict, root: Path) -> dict:
+    f = dict(f)
+    try:
+        f["size"] = (root / f["rel"]).stat().st_size
+    except OSError:
+        pass
+    f.pop("hold", None)
+    f["status"], note = classify(f["expected"], f.get("segments") or [], f.get("text_source") or "none")
+    if f.get("renamed_from"):
+        f["note"] = f"renamed from {Path(f['renamed_from']).name}"
+    elif f.get("split_from"):
+        f["note"] = f"split from {Path(f['split_from']).name}"
+    else:
+        f["note"] = note
+    return f
+
+
+def _plan_after_undo(series: dict, ap: dict, ctx) -> None:
+    """After an undo the files are back where the applied plan's scan found them:
+    plan from that scan again."""
+    plan = db.get_plan(ap["plan_id"]) if ap.get("plan_id") else None
+    scan = db.get_scan(plan["scan_id"]) if plan and plan.get("scan_id") else None
+    if not scan:
+        return
+    root = Path(series["path"])
+    files = [f for f in scan["results"]["files"] if (root / f["rel"]).exists()]
+    scan_id = db.add_scan(series["id"], {**scan["results"], "files": files, "after_undo": ap["id"]})
+    items = build_plan(db.get_series(series["id"]), db.get_scan(scan_id)["results"])
+    db.add_plan(series["id"], scan_id, items)
+    ctx.log("Plan restored to what it was before that apply.")
+
+
 @handler("apply")
 def job_apply(ctx, params):
     series = _series(ctx)
@@ -769,8 +863,13 @@ def job_apply(ctx, params):
     if plan["status"] != "draft":
         raise RuntimeError("This plan was already applied. Rescan to make a new plan.")
     result = apply_plan(series, plan, ctx)
-    if result.get("applied") and get_settings()["sonarr_rescan_after_apply"]:
-        sonarr_rescan(series, ctx)
+    if result.get("applied"):
+        try:
+            result["new_plan"] = _plan_after_apply(series, plan, ctx)
+        except Exception as e:  # noqa: BLE001 — the files are already moved; just say so
+            ctx.log(f"Couldn't update the plan ({e}); scan again to see what's left.")
+        if get_settings()["sonarr_rescan_after_apply"]:
+            sonarr_rescan(series, ctx)
     return result
 
 
@@ -783,6 +882,10 @@ def job_undo(ctx, params):
     if ap["undone_at"]:
         raise RuntimeError("Already undone")
     result = undo_apply(series, ap, ctx)
+    try:
+        _plan_after_undo(series, ap, ctx)
+    except Exception as e:  # noqa: BLE001
+        ctx.log(f"Couldn't update the plan ({e}); scan again to see what's left.")
     if get_settings()["sonarr_rescan_after_apply"]:
         sonarr_rescan(series, ctx)
     return result

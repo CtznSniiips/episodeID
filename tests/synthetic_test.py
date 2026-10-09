@@ -145,6 +145,15 @@ ctx = JobContext(job, sid)
 res2 = pipeline.job_scan(ctx, {})
 print("\nRESCAN:\n" + db.get_job(job)["log"])
 
+# The plan carried forward after the apply must agree with what a fresh scan says.
+carried = {it["source"]: it["kind"] for it in db.get_plan(r["new_plan"])["items"]}
+fresh = {it["source"]: it["kind"] for it in db.get_plan(res2["plan_id"])["items"]}
+print("\nPLAN AFTER APPLY (carried forward):")
+for k in sorted(carried):
+    print(f"  {carried[k]:7} {k}" + ("" if fresh.get(k) == carried[k] else f"   ≠ rescan: {fresh.get(k)}"))
+assert carried == fresh, (carried, fresh)
+print("CARRIED PLAN MATCHES RESCAN: True")
+
 # ----------------------------------------------------------------- undo
 job = db.add_job("undo", sid, {"apply_id": r["apply_id"]})
 ctx = JobContext(job, sid)
@@ -153,5 +162,9 @@ restored = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file
                   and "_episodeid_backup" not in str(p))
 before_nb = [b for b in before]
 print("UNDO RESTORED ORIGINAL SET:", restored == before_nb)
+undone = {it["source"]: it["kind"] for it in db.latest_plan(sid)["items"]}
+original = {it["source"]: it["kind"] for it in plan["items"]}
+print("PLAN AFTER UNDO MATCHES ORIGINAL:", undone == original)
+assert undone == original, (undone, original)
 if restored != before_nb:
     print(set(restored) ^ set(before_nb))
