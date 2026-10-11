@@ -44,6 +44,14 @@ const fmtTime = (s) => {
   s = Math.max(0, Math.round(s || 0));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 };
+const fmtCut = (t) => {
+  const m = Math.floor(t / 60), sec = t - m * 60;
+  return `${m}:${sec < 10 ? "0" : ""}${sec.toFixed(1)}`;
+};
+const parseCut = (v) => {
+  const p = String(v).trim().split(":").map(Number);
+  return p.some(isNaN) ? NaN : p.reduce((a, x) => a * 60 + x, 0);
+};
 const when = (iso) => iso ? new Date(iso).toLocaleString() : "";
 
 const STATUS_BADGE = {
@@ -454,6 +462,8 @@ async function tabPlan(reload = true) {
   }
   $$("button.set-ep", tab).forEach((b) => b.onclick = () => setEpisodeDialog(b.dataset.src, b.dataset.cur));
   $$("button.card-check", tab).forEach((b) => b.onclick = () => cardCheckDialog(b.dataset.src));
+  $$("button.cut-pick", tab).forEach((b) => b.onclick = () =>
+    cutDialog(plan, plan.items.find((x) => String(x.id) === b.dataset.iid)));
   $$("button.clear-ov", tab).forEach((b) => b.onclick = async () => {
     await api(`/api/series/${state.series.id}/overrides`, { method: "POST",
       body: { source: b.dataset.src, codes: null } }).catch(fail);
@@ -542,12 +552,113 @@ function rowHtml(it, eps, applied) {
       ${it.ai ? '<span class="badge b-ai">AI</span>' : ""}
       ${it.ref_warning ? '<span class="badge b-warn">check reference</span>' : ""}
       <div class="path" style="margin-top:4px">${esc(it.source)}</div>${targets}
+      ${it.kind === "split" && it.cuts ? `<div class="small" style="margin-top:2px"><span class="badge b-info">cut points chosen</span>
+        ${it.cuts.map((c) => c == null ? "auto" : fmtCut(c)).join(", ")}</div>` : ""}
       <div class="muted small">${esc(it.reason || "")}</div></td>
     <td>${segs}${src}</td>
     <td>${applied ? "" : `<button class="btn small set-ep" data-src="${esc(it.source)}" data-cur="${esc(cur)}">Set episode…</button>
       ${ovr ? `<button class="btn small clear-ov" data-src="${esc(it.source)}">Clear</button>` : ""}`}
-      <button class="btn small card-check" data-src="${esc(it.source)}" style="margin-top:4px" title="See what the title-card OCR reads in part of this file">Check title cards…</button></td>
+      <button class="btn small card-check" data-src="${esc(it.source)}" style="margin-top:4px" title="See what the title-card OCR reads in part of this file">Check title cards…</button>
+      ${it.kind === "split" && !applied ? `<button class="btn small cut-pick" data-iid="${it.id}" style="margin-top:4px" title="See where this file would be split, with pictures, and choose">Choose cut points…</button>` : ""}</td>
   </tr>`;
+}
+
+function cutDialog(plan, it) {
+  const sid = state.series.id;
+  const img = (t, w = 280) => `/api/series/${sid}/frame?source=${encodeURIComponent(it.source)}&t=${Math.max(0, t).toFixed(2)}&w=${w}`;
+  const box = modal(`<h2 style="margin-top:0">Choose cut points</h2>
+    <div class="path">${esc(it.source)}</div>
+    <p class="muted small">Where this file will be split. EpisodeID looks for black frames and silence near the point
+      where the dialogue changes episode; each place is moved to a keyframe, because a lossless split can only start on one.
+      The pictures show the last moment before the cut and the first after it.</p>
+    <div id="cuts-body"><span class="muted small">Looking for black frames and silence… (a few seconds per split)</span></div>
+    <div class="row" style="margin-top:12px"><button class="btn" id="cut-auto" title="Forget any chosen cut points">Use automatic</button>
+      <div class="spacer"></div><button class="btn" id="c">Cancel</button><button class="btn primary" id="cut-save" disabled>Save</button></div>`);
+  $("#modal-box").style.width = "min(980px, 100%)";
+  $("#c", box).onclick = closeModal;
+  const save = async (cuts) => {
+    try {
+      await api(`/api/plans/${plan.id}/items/${it.id}/cuts`, { method: "PUT", body: { cuts } });
+      closeModal(); tabPlan();
+    } catch (e) { fail(e); }
+  };
+  api(`/api/plans/${plan.id}/items/${it.id}/cut-candidates`).then((r) => {
+    const body = $("#cuts-body", box);
+    const name = (xs) => xs.map(([c, t]) => `<span class="mono">${esc(c)}</span> ${esc(t || "")}`).join(" + ");
+    const card = (n, c, chosen) => {
+      const before = c.gap ? c.gap[0] - 0.6 : c.t - 1, after = c.gap ? c.gap[1] + 0.3 : c.t + 0.3;
+      const what = c.kind === "estimate" ? "no gap found — estimate" :
+        `${esc(c.kind)} ${(c.gap[1] - c.gap[0]).toFixed(1)} s${c.in_gap ? "" : " (nearest keyframe is outside it)"}`;
+      return `<label class="card cut-card" style="padding:8px;cursor:pointer;display:block">
+        <div class="row" style="gap:6px"><input type="radio" name="b${n}" value="${c.t}" ${chosen ? "checked" : ""}>
+          <b class="mono">${fmtCut(c.t)}</b> <span class="small muted">${what}</span>
+          ${c.auto ? '<span class="badge b-info">automatic pick</span>' : ""}</div>
+        <div class="row" style="gap:4px;margin-top:6px;flex-wrap:nowrap">
+          <figure style="margin:0;flex:1"><img loading="lazy" src="${img(before)}" style="width:100%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
+            <figcaption class="small muted">before · ${fmtCut(before)}</figcaption></figure>
+          <figure style="margin:0;flex:1"><img loading="lazy" src="${img(after)}" style="width:100%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
+            <figcaption class="small muted">after · ${fmtCut(after)}</figcaption></figure></div></label>`;
+    };
+    body.innerHTML = r.boundaries.map((b, n) => {
+      const pick = b.chosen ?? b.auto;
+      const custom = b.chosen != null && !b.candidates.some((c) => Math.abs(c.t - b.chosen) < 0.05);
+      return `<div style="margin-bottom:16px"><h3 style="margin:8px 0 2px;font-size:14px">${name(b.from)} → ${name(b.to)}</h3>
+        <div class="small muted" style="margin-bottom:6px">The dialogue changes episode between ${fmtCut(b.prev_end)} and ${fmtCut(b.next_start)};
+          searched ${fmtCut(b.window[0])}–${fmtCut(b.window[1])}.</div>
+        <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px">
+          ${b.candidates.map((c) => card(n, c, !custom && Math.abs(c.t - pick) < 0.05)).join("")}
+          <div class="card" style="padding:8px">
+            <div class="row" style="gap:6px"><input type="radio" name="b${n}" value="custom" id="cr${n}" ${custom ? "checked" : ""}>
+              <b>Your own time</b></div>
+            <div class="row" style="gap:4px;margin-top:6px">
+              <input id="ct${n}" value="${fmtCut(custom ? b.chosen : b.auto)}" size="8" class="mono">
+              ${[-5, -1, 1, 5].map((d) => `<button class="btn small nudge" data-n="${n}" data-d="${d}" type="button">${d > 0 ? "+" : ""}${d}s</button>`).join("")}
+              <button class="btn small show" data-n="${n}" type="button">Show</button></div>
+            <div class="small muted" id="cs${n}" style="margin-top:4px">${custom ? `keyframe ${fmtCut(b.chosen)}` : "moved to the nearest keyframe when you press Show"}</div>
+            <div class="row" style="gap:4px;margin-top:6px;flex-wrap:nowrap" id="cp${n}">${custom ? `
+              <img src="${img(b.chosen - 1)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
+              <img src="${img(b.chosen + 0.3)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">` : ""}</div>
+          </div></div></div>`;
+    }).join("");
+    const customT = {};
+    r.boundaries.forEach((b, n) => {
+      const custom = b.chosen != null && !b.candidates.some((c) => Math.abs(c.t - b.chosen) < 0.05);
+      if (custom) customT[n] = b.chosen;
+    });
+    const show = async (n) => {
+      const t = parseCut($(`#ct${n}`, box).value);
+      if (isNaN(t)) return toast("Enter a time like 11:42.5");
+      $(`#cs${n}`, box).textContent = "Finding the nearest keyframe…";
+      try {
+        const s = await api(`/api/plans/${plan.id}/items/${it.id}/snap?t=${t}`);
+        customT[n] = s.t;
+        $(`#ct${n}`, box).value = fmtCut(s.t);
+        $(`#cs${n}`, box).textContent = Math.abs(s.t - t) > 0.05 ? `moved to the nearest keyframe, ${fmtCut(s.t)}` : `keyframe ${fmtCut(s.t)}`;
+        $(`#cp${n}`, box).innerHTML = [s.t - 1, s.t + 0.3].map((x) =>
+          `<img src="${img(x)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">`).join("");
+        $(`#cr${n}`, box).checked = true;
+      } catch (e) { $(`#cs${n}`, box).textContent = e.message; }
+    };
+    $$(".nudge", box).forEach((bt) => bt.onclick = () => {
+      const n = bt.dataset.n, i = $(`#ct${n}`, box);
+      const t = parseCut(i.value);
+      if (!isNaN(t)) { i.value = fmtCut(Math.max(0, t + Number(bt.dataset.d))); show(n); }
+    });
+    $$(".show", box).forEach((bt) => bt.onclick = () => show(bt.dataset.n));
+    const sv = $("#cut-save", box);
+    sv.disabled = false;
+    sv.onclick = () => {
+      const cuts = r.boundaries.map((b, n) => {
+        const v = (box.querySelector(`input[name="b${n}"]:checked`) || {}).value;
+        if (v === "custom") return customT[n] ?? null;
+        return v == null ? null : Number(v);
+      });
+      if (cuts.some((c, n) => c != null && n > 0 && cuts[n - 1] != null && c <= cuts[n - 1]))
+        return toast("Cut points must be in order");
+      save(cuts);
+    };
+    $("#cut-auto", box).onclick = () => save(r.boundaries.map(() => null));
+  }).catch((e) => { $("#cuts-body", box).innerHTML = `<span class="badge b-bad">Failed</span> ${esc(e.message)}`; });
 }
 
 function parseTime(v) {

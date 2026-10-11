@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -558,6 +558,83 @@ def plan_select(pid: int, body: Selection):
             it["selected"] = bool(body.selected[it["id"]])
     db.update_plan(pid, items=plan["items"])
     return {"ok": True}
+
+
+def _split_item(pid: int, iid: int):
+    plan = db.get_plan(pid) or _404()
+    it = next((x for x in plan["items"] if x.get("id") == iid), None)
+    if not it or it["kind"] != "split":
+        raise HTTPException(404, "No such split in this plan")
+    series = db.get_series(plan["series_id"]) or _404()
+    try:
+        video = safe_media_path(Path(series["path"]) / it["source"])
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not video.is_file():
+        raise HTTPException(404, "File not found — scan again")
+    return plan, it, series, video
+
+
+@app.get("/api/plans/{pid}/items/{iid}/cut-candidates")
+def cut_candidates(pid: int, iid: int):
+    """Where each split of this file could go, with the automatic pick marked."""
+    plan, it, series, video = _split_item(pid, iid)
+    tg = sorted(it["targets"], key=lambda t: float(t.get("start") or 0))
+    eps = {f"S{e['season']:02d}E{e['episode']:02d}": e.get("title") for e in series["episodes"]}
+    out = []
+    for n, (a, b) in enumerate(zip(tg, tg[1:])):
+        r = executor.cut_candidates(video, float(a["end"]), float(b["start"]))
+        r["from"] = [(c, eps.get(c)) for c in a.get("codes") or []]
+        r["to"] = [(c, eps.get(c)) for c in b.get("codes") or []]
+        r["chosen"] = (it.get("cuts") or [None] * len(tg))[n] if n < len(it.get("cuts") or []) else None
+        out.append(r)
+    return {"source": it["source"], "boundaries": out}
+
+
+@app.get("/api/series/{sid}/frame")
+def frame(sid: int, source: str, t: float, w: int = 320):
+    series = db.get_series(sid) or _404()
+    root = Path(series["path"]).resolve()
+    try:
+        video = safe_media_path(root / source)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if root not in video.parents or not video.is_file():
+        raise HTTPException(404, "File not found")
+    try:
+        data = executor.frame_jpeg(video, t, max(80, min(int(w), 960)))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(404, f"No frame: {e}") from e
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+
+@app.get("/api/plans/{pid}/items/{iid}/snap")
+def cut_snap(pid: int, iid: int, t: float):
+    """A time you typed, moved to the nearest keyframe (where a lossless cut can go)."""
+    _plan, _it, _series, video = _split_item(pid, iid)
+    return {"t": executor.snap_to_keyframe(video, t)}
+
+
+class Cuts(BaseModel):
+    cuts: list[float | None]
+
+
+@app.put("/api/plans/{pid}/items/{iid}/cuts")
+def cut_save(pid: int, iid: int, body: Cuts):
+    plan, it, _series, _video = _split_item(pid, iid)
+    if plan["status"] != "draft":
+        raise HTTPException(400, "Plan already applied")
+    n = len(it["targets"]) - 1
+    if len(body.cuts) != n:
+        raise HTTPException(400, f"Expected {n} cut point(s)")
+    chosen = [c for c in body.cuts if c is not None]
+    if any(c <= 0 for c in chosen) or chosen != sorted(chosen) or len(set(chosen)) != len(chosen):
+        raise HTTPException(400, "Cut points must be in order and after the start")
+    it["cuts"] = body.cuts if chosen else None
+    if not chosen:
+        it.pop("cuts", None)
+    db.update_plan(pid, items=plan["items"])
+    return {"ok": True, "cuts": it.get("cuts")}
 
 
 class Override(BaseModel):

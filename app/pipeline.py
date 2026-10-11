@@ -796,10 +796,14 @@ def _plan_after_apply(series: dict, plan: dict, ctx) -> int | None:
                 overrides[t["path"]] = ov
             files.append(_reclassified(g, root))
             continue
-        for t in it["targets"]:  # split
+        tg = sorted(it["targets"], key=lambda t: float(t.get("start") or 0))
+        cu = it.get("cuts_used") or []
+        dur = float(f.get("duration") or 0)
+        bounds = [0.0] + [float(x) for x in cu] + [dur] if len(cu) == len(tg) - 1 and dur else None
+        for n, t in enumerate(tg):  # split
             if t.get("duplicate"):
                 continue
-            a, b = float(t.get("start") or 0), float(t.get("end") or 0)
+            a, b = (bounds[n], bounds[n + 1]) if bounds else (float(t.get("start") or 0), float(t.get("end") or 0))
             segs = [{**sg, "start": max(0.0, float(sg.get("start", 0)) - a),
                      "end": min(b, float(sg.get("end", 0))) - a}
                     for sg in f.get("segments") or [] if sg.get("code") in (t.get("codes") or [])

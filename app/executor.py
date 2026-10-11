@@ -96,13 +96,96 @@ def find_cut(video: Path, prev_end: float, next_start: float, ctx=None) -> dict:
     return info
 
 
+def cut_candidates(video: Path, prev_end: float, next_start: float, k: int = 6) -> dict:
+    """Places a split between two episodes could go, for you to choose from: black or
+    silent gaps near where the dialogue changes episode, each snapped to a keyframe
+    (a lossless split can only start on one), best first. Includes the one Apply
+    would pick by itself."""
+    auto = find_cut(video, prev_end, next_start)["cut"]
+    center = (prev_end + next_start) / 2
+    lo, hi = min(prev_end, next_start) - 90, max(prev_end, next_start) + 90
+    lo = max(0.0, lo)
+    gaps = [(a, b, "black") for a, b in _blackdetect(video, lo, hi - lo) if b - a >= 0.25]
+    for a, b in _silencedetect(video, lo, hi - lo):
+        hit = next((g for g in gaps if g[0] - 0.5 <= b and a <= g[1] + 0.5), None)
+        if hit:  # black and silent at once: the clearest kind of break
+            gaps[gaps.index(hit)] = (min(a, hit[0]), max(b, hit[1]), "black + silence")
+        else:
+            gaps.append((a, b, "silence"))
+    kfs = _keyframes(video, lo - 10, hi + 10)
+
+    def snap(t: float, a: float | None = None, b: float | None = None) -> float:
+        inside = [x for x in kfs if a is not None and a - 0.05 <= x <= b + 0.05]
+        pool = inside or kfs
+        return round(min(pool, key=lambda x: abs(x - t)), 3) if pool else round(t, 3)
+
+    score = lambda g: (g[1] - g[0]) * 2 + (1.5 if g[2] == "black + silence" else 0) \
+        - abs((g[0] + g[1]) / 2 - center) / 30  # noqa: E731
+    out: list[dict] = []
+    for a, b, kind in sorted(gaps, key=score, reverse=True):
+        t = snap((a + b) / 2, a, b)
+        if any(abs(t - c["t"]) < 1.0 for c in out):
+            continue
+        out.append({"t": t, "gap": [round(a, 2), round(b, 2)], "kind": kind,
+                    "in_gap": a - 0.05 <= t <= b + 0.05})
+        if len(out) >= k:
+            break
+    if not any(abs(c["t"] - auto) < 0.05 for c in out):
+        out.insert(0, {"t": round(auto, 3), "gap": None, "kind": "estimate", "in_gap": False})
+    for c in out:
+        c["auto"] = abs(c["t"] - auto) < 0.05
+    out.sort(key=lambda c: c["t"])
+    return {"auto": round(auto, 3), "candidates": out, "window": [round(lo, 1), round(hi, 1)],
+            "prev_end": prev_end, "next_start": next_start}
+
+
+def snap_to_keyframe(video: Path, t: float) -> float:
+    kfs = _keyframes(video, t - 10, t + 10)
+    return round(min(kfs, key=lambda x: abs(x - t)), 3) if kfs else round(t, 3)
+
+
+def frame_jpeg(video: Path, t: float, width: int = 320) -> bytes:
+    """One frame of a video as a JPEG (cached)."""
+    import hashlib
+    from .config import CACHE_DIR
+    from .media_text import _cache_key
+    key = hashlib.sha1(f"{_cache_key(video)}|{t:.2f}|{width}".encode()).hexdigest()[:20]
+    path = CACHE_DIR / "frames" / f"{key}.jpg"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp.jpg")
+        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(video),
+                        "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "4", str(tmp)],
+                       capture_output=True, timeout=120)
+        if not tmp.exists():
+            raise FileNotFoundError("no frame at that time")
+        tmp.replace(path)
+    return path.read_bytes()
+
+
+def _start_time(src: Path) -> float:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of",
+                        "csv=p=0", str(src)], capture_output=True, text=True, timeout=60)
+    try:
+        return float(r.stdout.strip() or 0)
+    except ValueError:
+        return 0.0
+
+
 def _ffmpeg_copy(src: Path, dst: Path, start: float | None, dur: float | None) -> None:
+    # Seek near the cut first (fast), then trim on the file's own timestamps. Seeking
+    # straight to the cut lands on the nearest *indexed* point, often a keyframe or two
+    # early, and a stream copy keeps everything from there — the next episode would
+    # begin with the last seconds of the previous one.
+    t0 = _start_time(src)
     base = ["ffmpeg", "-v", "error", "-nostdin", "-y"]
     if start:
-        base += ["-ss", f"{start:.3f}"]
-    base += ["-i", str(src)]
+        base += ["-ss", f"{max(0.0, start - 15):.3f}"]
+    base += ["-copyts", "-i", str(src)]
+    if start:
+        base += ["-ss", f"{t0 + start:.3f}"]
     if dur:
-        base += ["-t", f"{dur:.3f}"]
+        base += ["-to", f"{t0 + (start or 0) + dur:.3f}"]
     tail = ["-c", "copy", "-avoid_negative_ts", "make_zero", "-max_muxing_queue_size",
             "4096", str(dst)]
     for maps in (["-map", "0"], ["-map", "0:v", "-map", "0:a?", "-map", "0:s?"]):
@@ -203,10 +286,16 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
         ctx.status(f"Splitting {src.name}")
         ctx.log(f"Split {it['source']} → {len(it['targets'])} files")
         targets = sorted(it["targets"], key=lambda t: t["start"])
+        chosen = it.get("cuts") or []
         cuts = [0.0]
-        for a, b in zip(targets, targets[1:]):
-            cuts.append(find_cut(src, a["end"], b["start"], ctx)["cut"])
+        for n, (a, b) in enumerate(zip(targets, targets[1:])):
+            if n < len(chosen) and chosen[n] is not None:
+                cuts.append(float(chosen[n]))
+                ctx.log(f"    cut at {float(chosen[n]):.2f}s (chosen)")
+            else:
+                cuts.append(find_cut(src, a["end"], b["start"], ctx)["cut"])
         cuts.append(None)
+        it["cuts_used"] = cuts[1:-1]
         for i, t in enumerate(targets):
             final = root / t["path"]
             final.parent.mkdir(parents=True, exist_ok=True)
@@ -259,7 +348,7 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
         _move(tmp, final, log, root, note)
         ctx.log(f"  → {final.relative_to(root)}")
 
-    db.update_plan(plan["id"], status="applied")
+    db.update_plan(plan["id"], status="applied", items=plan["items"])
     return {"apply_id": apply_id, "applied": len(items), "operations": len(log.ops)}
 
 

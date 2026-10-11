@@ -60,7 +60,7 @@ subtitles, references or anyone's episode numbering:
 - Nothing is deleted unless you ask: *Series options → Backup folder* shows what's there (count and size per folder) and deletes the folders you tick, after typing DELETE. Displaced files go to `_episodeid_backup/<Show>/` **beside** the series folder (in the same TV folder — not inside the series, so Sonarr doesn't pick them up; a backup folder left inside a series by an older version is moved there automatically, and Undo keeps working): `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`.
 - Every disk operation is logged as it happens, so even an interrupted apply can be undone.
 - Renames go through temporary names in two passes, so swaps and rotations are safe.
-- Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap between episodes.
+- Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap between episodes. To check or change where, use *Choose cut points…* on a split: the candidate places (black, silence, or both), each with a picture from just before and just after, plus your own time (snapped to the nearest keyframe).
 - Undo works newest-first and restores every move; split pieces are parked in `undone/`.
 - After an apply the plan updates itself — renamed files show as correct under their new names, split pieces as files of their own — so what's left (unticked changes, reviews) is all that remains. No rescan needed; an undo puts the plan back too.
 - All paths are confined to the mounted media folder.
