@@ -53,19 +53,24 @@ def _silencedetect(video: Path, start: float, length: float) -> list[tuple[float
 
 
 def _keyframes(video: Path, a: float, b: float) -> list[float]:
+    """Keyframe times between a and b, in seconds from the start of the file — the
+    same clock as players, black/silence detection, frame grabs and the cutter. (A
+    file's own timestamps may not start at zero: .ts recordings often start at 1.4 s,
+    and audio priming can put an MKV's start slightly before zero.)"""
+    t0 = _start_time(video)
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
-           "-read_intervals", f"{max(0, a):.3f}%{b:.3f}", "-show_entries",
+           "-read_intervals", f"{max(0.0, a + t0 - 1):.3f}%{b + t0 + 1:.3f}", "-show_entries",
            "frame=pts_time,best_effort_timestamp_time", "-of", "csv=p=0", str(video)]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     out = []
     for line in r.stdout.splitlines():
         for part in line.split(","):
             try:
-                out.append(float(part))
+                out.append(round(float(part) - t0, 3))
                 break
             except ValueError:
                 continue
-    return sorted(set(out))
+    return sorted({x for x in out if a - 1e-3 <= x <= b + 1e-3})
 
 
 def find_cut(video: Path, prev_end: float, next_start: float, ctx=None) -> dict:

@@ -54,7 +54,7 @@ assert img[:2] == b"\xff\xd8", "a JPEG"
 assert c.get(f"/api/series/{sid}/frame", params={"source": "../../etc/passwd", "t": 1}).status_code in (400, 404)
 snap = c.get(f"/api/plans/{pid}/items/0/snap", params={"t": 241.3}).json()["t"]
 print("  241.3 snapped to", snap)
-assert abs(snap - 242) < 0.11, snap  # keyframes every 2 s
+assert abs(snap - 242.128) < 0.01, snap  # keyframe at 242.0 in the file, which starts at -0.128 (audio priming)
 
 assert c.put(f"/api/plans/{pid}/items/0/cuts", json={"cuts": [-5]}).status_code == 400
 assert c.put(f"/api/plans/{pid}/items/0/cuts", json={"cuts": [snap]}).json()["cuts"] == [snap]
@@ -72,6 +72,26 @@ def dur(p):
 d1, d2 = dur(root / item["targets"][0]["path"]), dur(root / item["targets"][1]["path"])
 print(f"  pieces: {d1:.1f}s + {d2:.1f}s")
 orig = next((W / "media" / "tv" / "_episodeid_backup").rglob("*.mkv"))  # the original, kept
-assert abs(d1 - 242) < 1.5 and abs(d1 + d2 - dur(orig)) < 1.5, (d1, d2, dur(orig))
+assert abs(d1 - 242) < 0.3 and abs(d1 + d2 - dur(orig)) < 0.3, (d1, d2, dur(orig))
+
+
+def first_video_packet(p):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "packet=pts_time,flags",
+                          "-of", "csv=p=0", "-read_intervals", "%+#1", str(p)], capture_output=True, text=True).stdout
+    return out.splitlines()[0]
+
+
+second = root / item["targets"][1]["path"]
+print("  second piece starts with:", first_video_packet(second))
+assert first_video_packet(second).endswith("K__") or ",K" in first_video_packet(second), "starts on a keyframe"
+
+# Same with a file whose timestamps start at 1.4 s (MPEG-TS).
+ts = W / "t.ts"
+subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(orig), "-map", "0", "-c", "copy", str(ts)], check=True)
+k = executor.snap_to_keyframe(ts, 241.3)
+executor._ffmpeg_copy(ts, W / "a.ts", 0.0, k)
+executor._ffmpeg_copy(ts, W / "b.ts", k, None)
+print(f"  .ts: keyframe {k}, pieces {dur(W / 'a.ts'):.2f} + {dur(W / 'b.ts'):.2f} of {dur(ts):.2f}; b starts {first_video_packet(W / 'b.ts')}")
+assert abs(dur(W / "a.ts") + dur(W / "b.ts") - dur(ts)) < 0.3 and ",K" in first_video_packet(W / "b.ts")
 assert db.get_plan(pid)["items"][0]["cuts_used"] == [snap]
 print("PASS")

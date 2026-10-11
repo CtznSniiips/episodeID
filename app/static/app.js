@@ -563,6 +563,41 @@ function rowHtml(it, eps, applied) {
   </tr>`;
 }
 
+// Full-size frame, with stepping to find the exact moment one episode ends.
+function frameViewer(sid, source, t) {
+  document.querySelector(".lightbox")?.remove();
+  const lb = document.createElement("div");
+  lb.className = "lightbox";
+  lb.innerHTML = `<div class="lb-box">
+      <img alt="">
+      <div class="row lb-bar">
+        <button class="btn small" data-d="-1">−1 s</button><button class="btn small" data-d="-0.1">−0.1 s</button>
+        <b class="mono lb-t"></b>
+        <button class="btn small" data-d="0.1">+0.1 s</button><button class="btn small" data-d="1">+1 s</button>
+        <div class="spacer"></div><span class="small lb-hint">← → step · Esc closes</span>
+        <button class="btn small lb-close">Close</button></div></div>`;
+  document.body.append(lb);
+  const im = $("img", lb), label = $(".lb-t", lb);
+  const go = (x) => {
+    t = Math.max(0, Math.round(x * 10) / 10);
+    label.textContent = fmtCut(t);
+    im.style.opacity = ".5";
+    im.onload = () => { im.style.opacity = "1"; };
+    im.src = `/api/series/${sid}/frame?source=${encodeURIComponent(source)}&t=${t.toFixed(2)}&w=960`;
+  };
+  const close = () => { lb.remove(); document.removeEventListener("keydown", key, true); };
+  const key = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); close(); }
+    else if (e.key === "ArrowLeft") go(t - (e.shiftKey ? 1 : 0.1));
+    else if (e.key === "ArrowRight") go(t + (e.shiftKey ? 1 : 0.1));
+  };
+  document.addEventListener("keydown", key, true);
+  lb.onclick = (e) => { if (e.target === lb) close(); };
+  $(".lb-close", lb).onclick = close;
+  $$("button[data-d]", lb).forEach((b) => b.onclick = () => go(t + Number(b.dataset.d)));
+  go(t);
+}
+
 function cutDialog(plan, it) {
   const sid = state.series.id;
   const img = (t, w = 280) => `/api/series/${sid}/frame?source=${encodeURIComponent(it.source)}&t=${Math.max(0, t).toFixed(2)}&w=${w}`;
@@ -570,7 +605,7 @@ function cutDialog(plan, it) {
     <div class="path">${esc(it.source)}</div>
     <p class="muted small">Where this file will be split. EpisodeID looks for black frames and silence near the point
       where the dialogue changes episode; each place is moved to a keyframe, because a lossless split can only start on one.
-      The pictures show the last moment before the cut and the first after it.</p>
+      The pictures show the last moment before the cut and the first after it — click one to see it full size.</p>
     <div id="cuts-body"><span class="muted small">Looking for black frames and silence… (a few seconds per split)</span></div>
     <div class="row" style="margin-top:12px"><button class="btn" id="cut-auto" title="Forget any chosen cut points">Use automatic</button>
       <div class="spacer"></div><button class="btn" id="c">Cancel</button><button class="btn primary" id="cut-save" disabled>Save</button></div>`);
@@ -594,9 +629,9 @@ function cutDialog(plan, it) {
           <b class="mono">${fmtCut(c.t)}</b> <span class="small muted">${what}</span>
           ${c.auto ? '<span class="badge b-info">automatic pick</span>' : ""}</div>
         <div class="row" style="gap:4px;margin-top:6px;flex-wrap:nowrap">
-          <figure style="margin:0;flex:1"><img loading="lazy" src="${img(before)}" style="width:100%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
+          <figure style="margin:0;flex:1"><img class="zoomable" data-t="${before}" loading="lazy" src="${img(before)}" style="width:100%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
             <figcaption class="small muted">before · ${fmtCut(before)}</figcaption></figure>
-          <figure style="margin:0;flex:1"><img loading="lazy" src="${img(after)}" style="width:100%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
+          <figure style="margin:0;flex:1"><img class="zoomable" data-t="${after}" loading="lazy" src="${img(after)}" style="width:100%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
             <figcaption class="small muted">after · ${fmtCut(after)}</figcaption></figure></div></label>`;
     };
     body.innerHTML = r.boundaries.map((b, n) => {
@@ -616,8 +651,8 @@ function cutDialog(plan, it) {
               <button class="btn small show" data-n="${n}" type="button">Show</button></div>
             <div class="small muted" id="cs${n}" style="margin-top:4px">${custom ? `keyframe ${fmtCut(b.chosen)}` : "moved to the nearest keyframe when you press Show"}</div>
             <div class="row" style="gap:4px;margin-top:6px;flex-wrap:nowrap" id="cp${n}">${custom ? `
-              <img src="${img(b.chosen - 1)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
-              <img src="${img(b.chosen + 0.3)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">` : ""}</div>
+              <img class="zoomable" data-t="${b.chosen - 1}" src="${img(b.chosen - 1)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">
+              <img class="zoomable" data-t="${b.chosen + 0.3}" src="${img(b.chosen + 0.3)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">` : ""}</div>
           </div></div></div>`;
     }).join("");
     const customT = {};
@@ -635,7 +670,7 @@ function cutDialog(plan, it) {
         $(`#ct${n}`, box).value = fmtCut(s.t);
         $(`#cs${n}`, box).textContent = Math.abs(s.t - t) > 0.05 ? `moved to the nearest keyframe, ${fmtCut(s.t)}` : `keyframe ${fmtCut(s.t)}`;
         $(`#cp${n}`, box).innerHTML = [s.t - 1, s.t + 0.3].map((x) =>
-          `<img src="${img(x)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">`).join("");
+          `<img class="zoomable" data-t="${x}" src="${img(x)}" style="width:50%;border-radius:4px;background:#000;aspect-ratio:16/9;object-fit:contain">`).join("");
         $(`#cr${n}`, box).checked = true;
       } catch (e) { $(`#cs${n}`, box).textContent = e.message; }
     };
@@ -645,6 +680,12 @@ function cutDialog(plan, it) {
       if (!isNaN(t)) { i.value = fmtCut(Math.max(0, t + Number(bt.dataset.d))); show(n); }
     });
     $$(".show", box).forEach((bt) => bt.onclick = () => show(bt.dataset.n));
+    body.addEventListener("click", (e) => {
+      const im = e.target.closest("img.zoomable");
+      if (!im) return;
+      e.preventDefault(); e.stopPropagation();  // don't also tick the candidate
+      frameViewer(sid, it.source, Number(im.dataset.t));
+    });
     const sv = $("#cut-save", box);
     sv.disabled = false;
     sv.onclick = () => {

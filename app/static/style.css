@@ -129,3 +129,14 @@ form.settings legend { font-weight: 600; padding: 0 6px; }
   border-radius: 8px; cursor: pointer; flex: none; }
 .theme-btn:hover { background: var(--panel-2); color: var(--text); }
 .theme-btn svg { width: 18px; height: 18px; }
+
+img.zoomable { cursor: zoom-in; }
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 40; display: flex;
+  align-items: center; justify-content: center; padding: 16px; }
+.lb-box { width: min(1280px, 100%); }
+.lb-box img { width: 100%; max-height: 80vh; object-fit: contain; background: #000; border-radius: 6px;
+  display: block; transition: opacity .15s; }
+.lb-bar { margin-top: 10px; color: #fff; }
+.lb-bar .btn { color: var(--text); }
+.lb-bar .lb-t { min-width: 64px; text-align: center; }
+.lb-hint { color: rgba(255,255,255,.6); }
