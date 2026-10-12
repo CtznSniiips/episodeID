@@ -11,7 +11,7 @@ Works out which episode each video file **really** contains by reading its dialo
 
 ## How it works
 
-1. **Episode list** comes from TVDB (default/aired order, the same order Sonarr uses).
+1. **Episode list** comes from TVDB (default/aired order, the same order Sonarr uses). It's refreshed before a scan or reference fetch when it's more than 12 hours old, so renumbering on TVDB (episodes moved into a new season, say) is picked up; references and episodes you set by hand move to the new numbers with them. A filename naming an episode the list doesn't have is never renamed.
 2. **References** are what each episode is supposed to say, fetched once and cached:
    - files you upload yourself (*Episodes & references* tab), highest priority
    - a Fandom wiki transcript page (no quota cost). The wiki is found automatically from

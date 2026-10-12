@@ -1,7 +1,9 @@
 """Job handlers: the long-running work behind each button in the UI."""
 from __future__ import annotations
 
+import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db, fandom, llm, titlecard, tvdb
@@ -11,7 +13,8 @@ from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import get_dialogue
 from .planner import build_plan, list_videos
-from .references import (SAME_EPISODE_SCORE, detect_fandom_wiki, ep_code, load_refs, refresh_references,
+from .references import (SAME_EPISODE_SCORE, detect_fandom_wiki, ep_code, load_refs, norm_title,
+                         refresh_references, renumber_references,
                          verify_flagged)
 
 
@@ -22,21 +25,81 @@ def _series(ctx) -> dict:
     return s
 
 
-def _ensure_episodes(series: dict, ctx, force: bool = False) -> dict:
+EPISODES_MAX_AGE_H = 12
+
+
+def _ensure_episodes(series: dict, ctx, force: bool = False,
+                     max_age_h: float | None = None) -> dict:
+    """The series' TVDB episode list, fetched when missing, when asked, or when older
+    than max_age_h (TVDB renumbers: episodes move into a new season, specials get
+    numbers). Anything kept under an episode's old number moves with it."""
     if series["episodes"] and not force:
-        return series
+        if max_age_h is None:
+            return series
+        try:
+            age = (datetime.now(timezone.utc) -
+                   datetime.fromisoformat(series.get("episodes_updated") or "")).total_seconds() / 3600
+        except ValueError:
+            age = 1e9
+        if age < max_age_h:
+            return series
     ctx.status("Loading episode list from TVDB")
-    eps = tvdb.series_episodes(series["tvdb_id"])
+    try:
+        eps = tvdb.series_episodes(series["tvdb_id"])
+    except Exception as e:  # noqa: BLE001
+        if series["episodes"]:
+            ctx.log(f"TVDB: couldn't refresh the episode list ({e}); using the one from "
+                    f"{(series.get('episodes_updated') or '')[:10]}.")
+            return series
+        raise
     # keep IMDb IDs we already looked up
     old = {(e["season"], e["episode"]): e for e in series["episodes"]}
     for e in eps:
         prev = old.get((e["season"], e["episode"]))
-        if prev and prev.get("imdb_id") is not None:
+        if prev and prev.get("imdb_id") is not None and prev.get("title") == e.get("title"):
             e["imdb_id"] = prev["imdb_id"]
+    moves = _renumbered(series["episodes"], eps)
     db.update_series(series["id"], episodes=eps, episodes_updated=db.now())
+    if moves:
+        titles = {ep_code(e["season"], e["episode"]): e.get("title") for e in eps}
+        for o, n in sorted(moves.items(), key=lambda kv: kv[1]):
+            ctx.log(f"TVDB: '{titles.get(n)}' is now {n} (was {o}).")
+        moved = renumber_references(series["tvdb_id"], moves)
+        _renumber_options(series["id"], moves)
+        ctx.log(f"TVDB renumbered {len(moves)} episodes; {moved} references and any episodes "
+                "you set by hand moved with them.")
     ctx.log(f"TVDB: {len(eps)} episodes in "
             f"{len({e['season'] for e in eps if e['season'] > 0})} seasons.")
     return db.get_series(series["id"])
+
+
+def _renumbered(old_eps: list[dict], new_eps: list[dict]) -> dict[str, str]:
+    """old code → new code for episodes whose (unique) title now has another number."""
+    def by_title(eps):
+        seen: dict[str, list[str]] = {}
+        for e in eps:
+            t = norm_title(e.get("title") or "")
+            if t and not re.fullmatch(r"(tba|tbd|episode \d+)", t):
+                seen.setdefault(t, []).append(ep_code(e["season"], e["episode"]))
+        return {t: codes[0] for t, codes in seen.items() if len(codes) == 1}
+    a, b = by_title(old_eps), by_title(new_eps)
+    return {a[t]: b[t] for t in a.keys() & b.keys() if a[t] != b[t]}
+
+
+def _renumber_options(series_id: int, moves: dict[str, str]) -> None:
+    s = db.get_series(series_id)
+    opts = dict(s.get("options") or {})
+    m = lambda c: moves.get(c, c)  # noqa: E731
+    if isinstance(opts.get("overrides"), dict):
+        opts["overrides"] = {k: [m(c) for c in v] if isinstance(v, list) else v
+                             for k, v in opts["overrides"].items()}
+    for key in ("fandom_page_map", "fandom_title_overrides"):
+        if isinstance(opts.get(key), dict):
+            opts[key] = {m(k): v for k, v in opts[key].items()}
+    st = opts.get("title_cards_status")
+    if isinstance(st, dict) and isinstance(st.get("recurring"), dict):
+        st["recurring"] = {m(k): v for k, v in st["recurring"].items()}
+    db.update_series(series_id, options=opts)
 
 
 @handler("refresh_episodes")
@@ -101,7 +164,7 @@ def _find_wiki(series: dict, ctx, force: bool = False) -> dict:
 
 @handler("fetch_refs")
 def job_fetch_refs(ctx, params):
-    series = _ensure_episodes(_series(ctx), ctx)
+    series = _ensure_episodes(_series(ctx), ctx, max_age_h=EPISODES_MAX_AGE_H)
     before = dict((series.get("options") or {}).get("fandom_page_map") or {})
     series = _find_wiki(series, ctx, force=bool(params.get("find_wiki")))
     after = (series.get("options") or {}).get("fandom_page_map") or {}
@@ -121,7 +184,7 @@ def job_fetch_refs(ctx, params):
 @handler("scan")
 def job_scan(ctx, params):
     s = get_settings()
-    series = _ensure_episodes(_series(ctx), ctx)
+    series = _ensure_episodes(_series(ctx), ctx, max_age_h=EPISODES_MAX_AGE_H)
     root = Path(series["path"])
     opts = series.get("options") or {}
     include_specials = bool(opts.get("include_specials"))

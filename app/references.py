@@ -224,6 +224,43 @@ def _save_misses(tvdb_id: int, misses: dict) -> None:
     f.write_text(json.dumps(misses, indent=1))
 
 
+def renumber_references(tvdb_id: int, moves: dict[str, str]) -> int:
+    """TVDB moved episodes to new numbers (old code → new code): move their references
+    (downloaded and uploaded) and "not found" records along with them."""
+    if not moves:
+        return 0
+    n = 0
+    d = refs_dir(tvdb_id)
+    if d.exists():
+        staged = []
+        for old, new in moves.items():
+            f = d / f"{old}.json"
+            if f.exists():
+                tmp = d / f".renumber_{old}.json"
+                f.replace(tmp)
+                staged.append((tmp, d / f"{new}.json"))
+        for tmp, dst in staged:  # two passes, so swapped numbers don't collide
+            tmp.replace(dst)
+            n += 1
+    misses = _load_misses(tvdb_id)
+    if any(k in misses for k in moves):
+        _save_misses(tvdb_id, {moves.get(k, k): v for k, v in misses.items()})
+    md = manual_dir(tvdb_id)
+    if md.exists():
+        staged = []
+        for f in md.iterdir():
+            m = re.match(r"(?i)s(\d+)e(\d+)", f.name)
+            if m and ep_code(int(m[1]), int(m[2])) in moves:
+                new = moves[ep_code(int(m[1]), int(m[2]))]
+                tmp = md / f".renumber_{f.name}"
+                f.replace(tmp)
+                staged.append((tmp, md / (new + f.name[m.end():])))
+        for tmp, dst in staged:
+            tmp.replace(dst)
+            n += 1
+    return n
+
+
 def clear_reference(tvdb_id: int, code: str) -> None:
     (refs_dir(tvdb_id) / f"{code}.json").unlink(missing_ok=True)
     misses = _load_misses(tvdb_id)

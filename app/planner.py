@@ -333,6 +333,17 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
             continue
 
         codes = [c[1] for c in usable]
+        unknown = [c for c in f.get("expected") or [] if c not in eps]
+        if unknown and not any(c[2] == "manual" for c in usable):
+            # The filename names an episode TVDB's list (as EpisodeID last loaded it)
+            # doesn't have — most likely newer than the list (TVDB moved episodes into a
+            # new season, say). Don't rename on the old numbering.
+            items.append({**base, "kind": "review",
+                          "reason": f"{', '.join(unknown)} (from the filename) isn't in EpisodeID's "
+                                    "TVDB episode list — it may be newer than the list. Reload the "
+                                    "episode list (Episodes & references) and scan again.",
+                          "suggested": codes})
+            continue
         lost = [c for c in usable if winner.get(c[1], (None,))[0] != rel or
                 winner[c[1]][1] != c[0].get("start", 0)]
         ai = any(c[3] for c in usable)
