@@ -177,6 +177,47 @@ def _start_time(src: Path) -> float:
         return 0.0
 
 
+def _duration(p: Path) -> float | None:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                        "csv=p=0", str(p)], capture_output=True, text=True, timeout=120)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _check_piece(p: Path, want: float | None) -> str | None:
+    """Why a split piece isn't right, or None if it is."""
+    if not p.exists() or p.stat().st_size == 0:
+        return "not written"
+    got = _duration(p)
+    if got is None:
+        return "unreadable"
+    if want and abs(got - want) > max(3.0, want * 0.02):
+        return f"{got:.0f}s long, expected {want:.0f}s"
+    for ss in (0.0, max(0.0, got - 3)):
+        r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{ss:.2f}", "-i", str(p), "-t", "2",
+                            "-map", "0:v:0", "-f", "null", "-"], capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            return f"doesn't play at {'the start' if ss == 0 else 'the end'}"
+    return None
+
+
+def _check_space(root: Path, split_sources: list[Path]) -> None:
+    """Split pieces are written before the original moves out of the way, so they need
+    as much space again as the originals (plus a margin)."""
+    need = sum(p.stat().st_size for p in split_sources if p.exists())
+    if not need:
+        return
+    free = shutil.disk_usage(root).free
+    margin = max(200 * 1024 ** 2, need // 20)
+    if free < need + margin:
+        gb = lambda n: f"{n / 1024 ** 3:.1f} GB"  # noqa: E731
+        raise ApplyError(f"Not enough free space to split {len(split_sources)} file(s): needs about "
+                         f"{gb(need + margin)}, {gb(free)} free. Nothing was changed. Free some space, "
+                         "or untick the splits and apply the rest.")
+
+
 def _ffmpeg_copy(src: Path, dst: Path, start: float | None, dur: float | None) -> None:
     # Seek near the cut first (fast), then trim on the file's own timestamps. Seeking
     # straight to the cut lands on the nearest *indexed* point, often a keyframe or two
@@ -273,6 +314,8 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
             if root.resolve() not in p.parents and backup.resolve() not in p.parents:
                 raise ApplyError(f"Target escapes the series folder: {t['path']}")
 
+    _check_space(root, [root / it["source"] for it in items if it["kind"] == "split"])
+
     apply_id = db.add_apply(series["id"], plan["id"], [])
     log = _Log(apply_id)
     ctx.log(f"Apply #{apply_id}: {len(items)} items")
@@ -284,32 +327,53 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
         tmp_n += 1
         return near.parent / f".episodeid_tmp_{apply_id}_{tmp_n}{suffix}"
 
-    # 1. Splits: write pieces to temp names, then move the original into the backup.
-    for it in [i for i in items if i["kind"] == "split"]:
-        ctx.check_cancel()
-        src = root / it["source"]
-        ctx.status(f"Splitting {src.name}")
-        ctx.log(f"Split {it['source']} → {len(it['targets'])} files")
-        targets = sorted(it["targets"], key=lambda t: t["start"])
-        chosen = it.get("cuts") or []
-        cuts = [0.0]
-        for n, (a, b) in enumerate(zip(targets, targets[1:])):
-            if n < len(chosen) and chosen[n] is not None:
-                cuts.append(float(chosen[n]))
-                ctx.log(f"    cut at {float(chosen[n]):.2f}s (chosen)")
-            else:
-                cuts.append(find_cut(src, a["end"], b["start"], ctx)["cut"])
-        cuts.append(None)
-        it["cuts_used"] = cuts[1:-1]
-        for i, t in enumerate(targets):
-            final = root / t["path"]
-            final.parent.mkdir(parents=True, exist_ok=True)
-            tmp = tmp_name(final, src.suffix)
-            start = cuts[i]
-            dur = (cuts[i + 1] - start) if cuts[i + 1] is not None else None
-            _ffmpeg_copy(src, tmp, start, dur)
-            log.add({"op": "create", "dst": _rel(tmp, root),
-                     "note": f"split piece of {it['source']}"})
+    # 1. Splits: write every piece to a temp name and check it (right length, plays at the
+    # start and the end) before ANY original moves. A failed write (disk full, a damaged
+    # source) stops here with nothing changed.
+    splits = []
+    try:
+        for it in [i for i in items if i["kind"] == "split"]:
+            ctx.check_cancel()
+            src = root / it["source"]
+            ctx.status(f"Splitting {src.name}")
+            ctx.log(f"Split {it['source']} → {len(it['targets'])} files")
+            targets = sorted(it["targets"], key=lambda t: t["start"])
+            chosen = it.get("cuts") or []
+            cuts = [0.0]
+            for n, (a, b) in enumerate(zip(targets, targets[1:])):
+                if n < len(chosen) and chosen[n] is not None:
+                    cuts.append(float(chosen[n]))
+                    ctx.log(f"    cut at {float(chosen[n]):.2f}s (chosen)")
+                else:
+                    cuts.append(find_cut(src, a["end"], b["start"], ctx)["cut"])
+            cuts.append(None)
+            it["cuts_used"] = cuts[1:-1]
+            total = _duration(src)
+            pieces = []
+            splits.append((it, src, pieces))
+            for i, t in enumerate(targets):
+                final = root / t["path"]
+                final.parent.mkdir(parents=True, exist_ok=True)
+                tmp = tmp_name(final, src.suffix)
+                start = cuts[i]
+                dur = (cuts[i + 1] - start) if cuts[i + 1] is not None else None
+                pieces.append((tmp, final, t, dur if dur is not None else (total - start if total else None)))
+                _ffmpeg_copy(src, tmp, start, dur)
+            problems = [f"{t['path']}: {why}" for tmp, _f, t, want in pieces
+                        for why in [_check_piece(tmp, want)] if why]
+            if problems:
+                raise ApplyError(f"Split of {it['source']} didn't come out right: {'; '.join(problems)}. "
+                                 "Nothing was changed; every file is where it was.")
+            ctx.log("    pieces checked: right length, play at start and end")
+    except BaseException:
+        for _it, _src, pieces in splits:
+            for tmp, *_ in pieces:
+                tmp.unlink(missing_ok=True)
+        db.delete_apply(apply_id)
+        raise
+    for it, src, pieces in splits:
+        for tmp, final, t, _want in pieces:
+            log.add({"op": "create", "dst": _rel(tmp, root), "note": f"split piece of {it['source']}"})
             pending.append((tmp, final, f"split {t['codes'][0]}"))
         dst = _free(backup / "split_originals" / it["source"])
         for side in sidecars(src):
@@ -503,6 +567,29 @@ def delete_backup(series: dict, buckets: list[str]) -> dict:
 
 
 # -------------------------------------------------------------------- Sonarr
+
+def sonarr_series_type_note(series: dict) -> str | None:
+    """A warning when Sonarr names this series differently (anime: absolute numbers;
+    daily: air dates). EpisodeID always names by season and episode."""
+    import httpx
+    s = get_settings()
+    if not (s["sonarr_url"] and s["sonarr_api_key"]):
+        return None
+    try:
+        r = httpx.get(f"{s['sonarr_url'].rstrip('/')}/api/v3/series", params={"tvdbId": series["tvdb_id"]},
+                      headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=15)
+        found = r.json() if r.status_code == 200 else []
+    except Exception:  # noqa: BLE001 — only a warning
+        return None
+    found = [x for x in found if isinstance(x, dict) and x.get("tvdbId") == series["tvdb_id"]]
+    kind = (found[0].get("seriesType") or "standard").lower() if found else "standard"
+    if kind == "standard":
+        return None
+    how = "absolute episode numbers" if kind == "anime" else "air dates"
+    return (f"Note: Sonarr treats this as a{'n' if kind == 'anime' else ''} {kind} series and names its files "
+            f"with {how}. EpisodeID names by season and episode, so names won't match Sonarr's; "
+            "Sonarr's Rename Files can put them back to its format after applying.")
+
 
 def sonarr_rescan(series: dict, ctx) -> None:
     import httpx

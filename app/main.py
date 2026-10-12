@@ -45,6 +45,31 @@ def _startup():
     threading.Thread(target=_move_old_backups, name="move-backups", daemon=True).start()
 
 
+@app.middleware("http")
+async def _login(request, call_next):
+    """Optional login (Settings → Security). HTTP Basic: the browser asks once and sends
+    it with every request after. The container's own healthcheck stays open."""
+    s = get_settings()
+    user, pw = s["auth_username"], s["auth_password"]
+    if not (user and pw) or (request.url.path == "/api/status" and request.client
+                             and request.client.host in ("127.0.0.1", "::1")):
+        return await call_next(request)
+    import base64
+    import secrets
+    got = request.headers.get("authorization", "")
+    if got[:6].lower() == "basic ":
+        try:
+            u, _, p = base64.b64decode(got[6:]).decode("utf-8").partition(":")
+        except (ValueError, UnicodeDecodeError):
+            u = p = ""
+        ok_u = secrets.compare_digest(u.encode(), user.encode())
+        ok_p = secrets.compare_digest(p.encode(), pw.encode())
+        if ok_u and ok_p:
+            return await call_next(request)
+    return Response("Login required", status_code=401,
+                    headers={"WWW-Authenticate": 'Basic realm="EpisodeID", charset="UTF-8"'})
+
+
 def _404(what="Not found"):
     raise HTTPException(404, what)
 
@@ -70,6 +95,81 @@ def read_settings():
 def write_settings(body: dict):
     save_settings(body)
     return read_settings()
+
+
+_COLON = {"0": "delete", "1": "dash", "2": "space_dash", "3": "space_dash_space", "4": "smart",
+          "5": "custom", "delete": "delete", "dash": "dash", "spacedash": "space_dash",
+          "spacedashspace": "space_dash_space", "smart": "smart", "custom": "custom"}
+_MULTI = {"0": "extend", "1": "duplicate", "2": "repeat", "3": "scene", "4": "range", "5": "prefixed_range",
+          "extend": "extend", "duplicate": "duplicate", "repeat": "repeat", "scene": "scene",
+          "range": "range", "prefixedrange": "prefixed_range"}
+
+
+def _enum(table: dict, v):
+    return table.get(re.sub(r"[^a-z0-9]", "", str(v).lower())) if v is not None else None
+
+
+def sonarr_naming(s: dict | None = None) -> dict:
+    """Sonarr's Media Management naming, translated to EpisodeID settings."""
+    from .planner import unknown_tokens
+    s = s or get_settings()
+    if not (s["sonarr_url"] and s["sonarr_api_key"]):
+        raise HTTPException(400, "Set the Sonarr URL and API key first.")
+    base, h = s["sonarr_url"].rstrip("/"), {"X-Api-Key": s["sonarr_api_key"]}
+    try:
+        r = httpx.get(f"{base}/api/v3/config/naming", headers=h, timeout=15)
+        r.raise_for_status()
+        n = r.json()
+        series = httpx.get(f"{base}/api/v3/series", headers=h, timeout=60).json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise HTTPException(502, f"Couldn't read Sonarr's naming settings: {e}")
+    new, notes = {}, []
+    if isinstance(n.get("replaceIllegalCharacters"), bool):
+        new["replace_illegal_characters"] = n["replaceIllegalCharacters"]
+    if _enum(_COLON, n.get("colonReplacementFormat")):
+        new["colon_replacement"] = _enum(_COLON, n["colonReplacementFormat"])
+    if n.get("customColonReplacementFormat") is not None:
+        new["colon_replacement_custom"] = n["customColonReplacementFormat"] or ""
+    if _enum(_MULTI, n.get("multiEpisodeStyle")):
+        new["multi_episode_style"] = _enum(_MULTI, n["multiEpisodeStyle"])
+    fmt = (n.get("standardEpisodeFormat") or "").strip()
+    if fmt:
+        new["naming_format"] = fmt
+        dropped = unknown_tokens(fmt)
+        if dropped:
+            notes.append("EpisodeID can't fill " + ", ".join(dropped) + " (Sonarr reads them from the file "
+                         "itself), so they're left out of new names. Files that are already right aren't "
+                         "renamed because of this; Sonarr's Rename Files can add them afterwards.")
+    if (n.get("seasonFolderFormat") or "").strip():
+        new["season_folder_format"] = n["seasonFolderFormat"].strip()
+    if (n.get("specialsFolderFormat") or "").strip() and "{" not in n["specialsFolderFormat"]:
+        new["specials_folder"] = n["specialsFolderFormat"].strip()
+    if n.get("renameEpisodes") is False:
+        notes.append("Sonarr has \"Rename Episodes\" turned off, so its own files may not follow this format.")
+    mine = {sr["tvdb_id"]: sr["name"] for sr in db.list_series()}
+    for sr in series if isinstance(series, list) else []:
+        kind = (sr.get("seriesType") or "standard").lower()
+        if kind != "standard" and sr.get("tvdbId") in mine:
+            notes.append(f"{mine[sr['tvdbId']]} is a{'n' if kind == 'anime' else ''} {kind} series in Sonarr. "
+                         f"Sonarr names those with its {kind} format"
+                         + (" and absolute episode numbers" if kind == "anime" else " (air dates)")
+                         + "; EpisodeID uses season and episode numbers, so its names will differ from Sonarr's.")
+    return {"settings": new, "notes": notes}
+
+
+@app.post("/api/sonarr/import-naming")
+def import_sonarr_naming():
+    got = sonarr_naming()
+    locked = set(env_locked_keys())
+    before = get_settings()
+    use = {k: v for k, v in got["settings"].items() if k not in locked}
+    save_settings(use)
+    after = get_settings()
+    changed = {k: [before[k], after[k]] for k in use if before[k] != after[k]}
+    skipped = sorted(set(got["settings"]) & locked)
+    notes = got["notes"] + ([f"Not changed because they're set by environment variables: {', '.join(skipped)}."]
+                            if skipped else [])
+    return {"changed": changed, "notes": notes}
 
 
 @app.post("/api/test/{service}")

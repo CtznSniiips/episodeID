@@ -95,3 +95,39 @@ print(f"  .ts: keyframe {k}, pieces {dur(W / 'a.ts'):.2f} + {dur(W / 'b.ts'):.2f
 assert abs(dur(W / "a.ts") + dur(W / "b.ts") - dur(ts)) < 0.3 and ",K" in first_video_packet(W / "b.ts")
 assert db.get_plan(pid)["items"][0]["cuts_used"] == [snap]
 print("PASS")
+
+# Safety: nothing moves when a piece comes out wrong, or when there isn't room to split.
+src2 = root / "Season 01" / "Show - S01E03-E04 - Again.mkv"
+shutil.copy(orig, src2)
+item2 = {**item, "source": str(src2.relative_to(root)), "cuts": None,
+         "targets": [{"path": "Season 01/Show - S01E03 - Three.mkv", "codes": ["S01E03"], "start": 0, "end": 290},
+                     {"path": "Season 01/Show - S01E04 - Four.mkv", "codes": ["S01E04"], "start": 305, "end": 600}]}
+real_copy, n_applies = executor._ffmpeg_copy, len(db.list_applies(sid))
+
+
+def short_copy(s, d, start, dur):  # a write that stopped early (disk full, say)
+    real_copy(s, d, start, 20 if dur is None else min(dur, 20))
+
+
+before = sorted(p.name for p in (root / "Season 01").iterdir())
+for patch, want in ((("_ffmpeg_copy", short_copy), "didn't come out right"),
+                    (("_check_space", None), "Not enough free space")):
+    pid2 = db.add_plan(sid, None, [dict(item2)])
+    if patch[1] is None:
+        real_du = shutil.disk_usage
+        executor.shutil.disk_usage = lambda p: real_du(p)._replace(free=10 * 1024 ** 2)
+    else:
+        setattr(executor, *patch)
+    try:
+        executor.apply_plan(db.get_series(sid), db.get_plan(pid2), JobContext(db.add_job("apply", sid, {}), sid))
+        raise AssertionError("should have stopped")
+    except executor.ApplyError as e:
+        print("  stopped:", str(e)[:110])
+        assert want in str(e), e
+    finally:
+        executor._ffmpeg_copy = real_copy
+        executor.shutil.disk_usage = shutil.disk_usage if patch[1] is not None else real_du
+    assert sorted(p.name for p in (root / "Season 01").iterdir()) == before, "nothing moved, no temp files left"
+    assert len(db.list_applies(sid)) == n_applies, "no empty apply left behind"
+assert executor._check_piece(src2, 600) is None and "long" in executor._check_piece(src2, 300)
+print("PASS (split safety)")

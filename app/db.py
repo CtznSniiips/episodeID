@@ -214,6 +214,10 @@ def get_apply(apply_id: int) -> dict | None:
     return _row(r, ("log",))
 
 
+def delete_apply(apply_id: int) -> None:
+    conn().execute("DELETE FROM applies WHERE id=?", (apply_id,))
+
+
 def list_applies(series_id: int) -> list[dict]:
     rows = conn().execute(
         "SELECT id, series_id, plan_id, created, undone_at, json_array_length(log) AS ops "

@@ -17,6 +17,7 @@ async function api(path, opts = {}) {
     init.body = JSON.stringify(opts.body);
   }
   const r = await fetch(path, init);
+  if (r.status === 401) { location.reload(); throw new Error("Login required"); }  // the browser asks for the login
   const ct = r.headers.get("content-type") || "";
   const data = ct.includes("json") ? await r.json() : await r.text();
   if (!r.ok) throw new Error((data && data.detail) || r.statusText);
@@ -1085,15 +1086,23 @@ async function renderSettings() {
     ${cb("sonarr_rescan_after_apply", "Rescan after apply / undo")}
     ${test("sonarr")}</fieldset>
   <fieldset><legend>Naming</legend>
-    ${f("naming_format", "Episode file name", "Tokens: {series} {season:02d} {episode:02d} {title} {quality}. {quality} is carried over from the old name (e.g. WEBDL-1080p).")}
+    <div class="row" style="justify-content:flex-end;margin-bottom:8px"><span class="small muted" id="naming-import-out"></span>
+      <button class="btn small" type="button" id="naming-import" title="Reads Sonarr's Media Management naming settings (needs the Sonarr URL and API key above)">Copy from Sonarr</button></div>
+    ${f("naming_format", "Episode file name", "Sonarr's tokens work as they are ({Series Title} - S{season:00}E{episode:00} - {Episode Title} {Quality Full}), as do {series} {season:02d} {episode:02d} {title} {quality} {year}. Quality is carried over from the old name (e.g. WEBDL-1080p). MediaInfo and release-group tokens are left out.")}
     ${cb("replace_illegal_characters", "Replace illegal characters", "As in Sonarr (Media Management): \\ / → +, ? → ! (a ? ending a title is dropped), * → -, others removed. Off: all removed.")}
     ${sel("colon_replacement", "Colon replacement", [["smart", "Smart — \"Up: Pups\" → \"Up - Pups\" (Sonarr)"], ["delete", "Delete"], ["dash", "Replace with dash"], ["space_dash", "Replace with space dash"], ["space_dash_space", "Replace with space dash space"], ["custom", "Custom"]], "Match your Sonarr setting so names come out the same.")}
     ${f("colon_replacement_custom", "Custom colon replacement", "Only used when Colon replacement is Custom.")}
-    ${sel("multi_episode_style", "Multi-episode style", [["prefixed_range", "Prefixed range — S01E01-E02 (Sonarr default)"], ["extend", "Extend — S01E01-02"], ["repeat", "Repeat — S01E01E02"]])}
+    ${sel("multi_episode_style", "Multi-episode style", [["prefixed_range", "Prefixed Range — S01E01-E03 (Sonarr default)"], ["extend", "Extend — S01E01-02-03"], ["duplicate", "Duplicate — S01E01 - S01E02 - S01E03"], ["repeat", "Repeat — S01E01E02E03"], ["scene", "Scene — S01E01-E02-E03"], ["range", "Range — S01E01-03"]])}
     ${f("season_folder_format", "Season folder", "Used only when a season folder doesn't exist yet.")}
     ${f("specials_folder", "Specials folder")}
-    ${f("backup_folder", "Backup folder", "Created inside each series folder. Displaced files go here — nothing is deleted.")}
+    ${f("backup_folder", "Backup folder", "Created next to your series folders (<TV>/_episodeid_backup/<Show>/…), out of Sonarr's sight. Displaced files go here — nothing is deleted.")}
     ${cb("allow_splits", "Allow splitting multi-episode files", "Lossless cuts at the black gap between episodes.")}</fieldset>
+  <fieldset><legend>Security</legend>
+    <p class="muted small" style="margin-top:0">Set both to ask for a login before the web UI opens (your browser asks once and
+      remembers it). Leave either blank for no login. Locked out? Set AUTH_USERNAME / AUTH_PASSWORD on the container,
+      or remove them from /config/settings.json.</p>
+    ${f("auth_username", "Username")}
+    ${f("auth_password", "Password", "", "password")}</fieldset>
   <fieldset><legend>Matching (advanced)</legend>
     ${f("window_seconds", "Window length (s)", "", "number")}
     ${f("window_step_seconds", "Window step (s)", "", "number")}
@@ -1116,6 +1125,18 @@ async function renderSettings() {
     e.preventDefault();
     try { await api("/api/settings", { method: "PUT", body: collect() }); toast("Settings saved"); refreshChips(); }
     catch (err) { fail(err); }
+  };
+  $("#naming-import").onclick = async () => {
+    const out = $("#naming-import-out");
+    out.textContent = "Saving & reading Sonarr…";
+    try {
+      await api("/api/settings", { method: "PUT", body: collect() });
+      const r = await api("/api/sonarr/import-naming", { method: "POST" });
+      const n = Object.keys(r.changed).length;
+      toast(n ? `Copied ${n} naming setting${n === 1 ? "" : "s"} from Sonarr` : "Naming already matches Sonarr");
+      await renderSettings();
+      if (r.notes.length) alert(r.notes.join("\n\n"));
+    } catch (err) { out.textContent = err.message; }
   };
   $$("button.test", form).forEach((b) => b.onclick = async () => {
     const out = $(`#t-${b.dataset.svc}`);

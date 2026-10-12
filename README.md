@@ -61,9 +61,11 @@ subtitles, references or anyone's episode numbering:
 - Every disk operation is logged as it happens, so even an interrupted apply can be undone.
 - Renames go through temporary names in two passes, so swaps and rotations are safe.
 - Splits are lossless stream copies cut on a keyframe inside the black (or silent) gap between episodes. To check or change where, use *Choose cut points…* on a split: the candidate places (black, silence, or both), each with a picture from just before and just after, plus your own time (snapped to the nearest keyframe).
+- Before any original is moved, every split piece is checked: it has the expected length and plays at its start and its end. Free space is checked first too (splitting needs about as much again as the files being split). If either check fails, the apply stops with nothing changed.
 - Undo works newest-first and restores every move; split pieces are parked in `undone/`.
 - After an apply the plan updates itself — renamed files show as correct under their new names, split pieces as files of their own — so what's left (unticked changes, reviews) is all that remains. No rescan needed; an undo puts the plan back too.
 - All paths are confined to the mounted media folder.
+- Optional login: set a username and password under *Settings → Security* (or `AUTH_USERNAME` / `AUTH_PASSWORD`) and the browser asks for them before the web UI opens. The container's own healthcheck still works. Locked out? Set the two variables on the container, or remove them from `/config/settings.json`.
 
 ## Running
 
@@ -94,14 +96,17 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 | `SUBTITLE_LANGUAGE` | `en` | Reference language and embedded-track preference |
 | `WHISPER_ENABLED` / `WHISPER_MODEL` / `WHISPER_DEVICE` | `true` / `small` / `auto` | |
 | `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | off | e.g. `http://ollama:11434/v1`, `qwen3:8b` |
-| `SONARR_URL`, `SONARR_API_KEY` | | Triggers a series rescan after apply/undo |
-| `NAMING_FORMAT` | `{series} - S{season:02d}E{episode:02d} - {title} {quality}` | `{quality}` is carried over from the old filename |
+| `SONARR_URL`, `SONARR_API_KEY` | | Triggers a series rescan after apply/undo; *Copy from Sonarr* (Settings → Naming) copies its naming settings |
+| `NAMING_FORMAT` | `{series} - S{season:02d}E{episode:02d} - {title} {quality}` | Sonarr's tokens work too (`{Series Title}`, `{Series TitleYear}`, `{season:00}`, `{Episode Title}`, `{Episode CleanTitle}`, `{Quality Full}`, …). Quality is carried over from the old filename; MediaInfo and release-group tokens are left out |
 | `REPLACE_ILLEGAL_CHARACTERS` | `true` | As Sonarr: `\ /` → `+`, `?` → `!`, `*` → `-`, `< > \| "` removed (`false`: all removed) |
 | `COLON_REPLACEMENT` | `smart` | As Sonarr: `smart` ("Up: Pups" → "Up - Pups"), `delete`, `dash`, `space_dash`, `space_dash_space`, `custom` (+ `COLON_REPLACEMENT_CUSTOM`) |
-| `MULTI_EPISODE_STYLE` | `prefixed_range` | `S01E01-E02` (Sonarr default), `extend`, `repeat` |
+| `MULTI_EPISODE_STYLE` | `prefixed_range` | As Sonarr: `prefixed_range` S01E01-E03 (default), `extend` S01E01-02-03, `duplicate` S01E01 - S01E02 - S01E03, `repeat` S01E01E02E03, `scene` S01E01-E02-E03, `range` S01E01-03 |
+| `AUTH_USERNAME`, `AUTH_PASSWORD` | | Both set: the web UI asks for a login |
 | `MIN_SCORE`, `MIN_MARGIN`, `MIN_SEGMENT_SECONDS` | `0.12`, `0.04`, `240` | Matching thresholds |
 
 `{series}` defaults to the series folder name; change it per series under *Series options*.
+
+**Copy from Sonarr** reads Sonarr's Media Management naming (episode format, season folder, colon replacement, illegal characters, multi-episode style) and saves it here; settings locked by environment variables are left alone. It also lists any series Sonarr treats as *anime* or *daily*: Sonarr names those by absolute number or air date, while EpisodeID always uses season and episode numbers. Scans of such a series say so in the log too.
 
 ## Workflow
 

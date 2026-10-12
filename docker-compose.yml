@@ -16,6 +16,8 @@ services:
       # - OPENSUBTITLES_PASSWORD=
       # - SONARR_URL=http://sonarr:8989
       # - SONARR_API_KEY=
+      # - AUTH_USERNAME=   # set both to require a login for the web UI
+      # - AUTH_PASSWORD=
       # - LLM_ENABLED=true
       # - LLM_BASE_URL=http://ollama:11434/v1
       # - LLM_MODEL=qwen3:8b

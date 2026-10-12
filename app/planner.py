@@ -73,23 +73,112 @@ def sanitize(name: str) -> str:
     return re.sub(r"\s{2,}", " ", name).strip()
 
 
-class _EpNum:
-    """Formats like an int for {episode:02d}, but renders ranges for multi-episode files."""
+# ---- naming formats -------------------------------------------------------
+# A format can use EpisodeID's own tokens ({series} {season:02d} {episode:02d} {title}
+# {quality} {year}) or Sonarr's ({Series Title} - S{season:00}E{episode:00} -
+# {Episode Title} {Quality Full}), so a format copied from Sonarr works as it is.
 
-    def __init__(self, nums: list[int], style: str):
-        self.nums, self.style = nums, style
+MULTI_STYLES = ("extend", "duplicate", "repeat", "scene", "range", "prefixed_range")
+_SE = re.compile(r"(?P<sep>(?<=\})[- ._]+?)?(?P<se>(?P<s>s?)\{season(?::(?P<sf>[0-9d]+))?\}"
+                 r"(?P<esep>[- ._]?[ex])\{episode(?::(?P<ef>[0-9d]+))?\})", re.I)
+_TOKEN = re.compile(r"\{(?P<pre>[- ._\[(]*)(?P<name>[a-z0-9]+(?:(?P<wsep>[- ._])[a-z0-9]+)*)"
+                    r"(?::(?P<fmt>[^}]*?))?(?P<post>[- ._)\]]*)\}", re.I)
+_SCENE_REMOVE = re.compile(r"(?<=\s)[,<>/\;:'\"|`’~!?@$%^*\-_=](?=\s)|['`’:?,](?=(?:s|m|t|ve|ll|d|re)\s|\s|$)"
+                           r"|[()\[\]{}]")
+# What each token reads from; unknown tokens render empty and are reported.
+_TOKEN_KEYS = {
+    "series": "series", "seriestitle": "series", "seriestitleyear": "series_year",
+    "seriestitlewithoutyear": "series_noyear", "seriescleantitle": "series_clean",
+    "seriescleantitleyear": "series_clean_year", "seriescleantitlewithoutyear": "series_clean_noyear",
+    "season": "season", "episode": "episode", "title": "title", "episodetitle": "title",
+    "episodecleantitle": "title_clean", "quality": "quality", "qualityfull": "quality",
+    "qualitytitle": "quality", "year": "year",
+}
 
-    def __format__(self, spec):
-        parts = [format(n, spec) for n in self.nums]
-        if len(parts) == 1:
-            return parts[0]
-        if self.style == "repeat":          # S01E01E02
-            return "E".join(parts)
-        if self.style == "extend":          # S01E01-02
-            return f"{parts[0]}-{parts[-1]}"
-        if self.style == "duplicate":       # S01E01.S01E02 is rarely wanted; fall back
-            return f"{parts[0]}-E{parts[-1]}"
-        return f"{parts[0]}-E{parts[-1]}"   # prefixed_range (Sonarr default): S01E01-E02
+
+def _num(n: int, spec: str | None) -> str:
+    """{season:00} (Sonarr) or {season:02d} (Python) → zero-padded number."""
+    if not spec:
+        return str(n)
+    if re.fullmatch(r"0+", spec):
+        return str(n).zfill(len(spec))
+    try:
+        return format(n, spec)
+    except ValueError:
+        return str(n)
+
+
+def clean_title(t: str) -> str:
+    """Sonarr's CleanTitle (for {Series CleanTitle} / {Episode CleanTitle})."""
+    t = re.sub(r"[/\\]", " ", t.replace("&", "and"))
+    return re.sub(r"\s{2,}", " ", _SCENE_REMOVE.sub("", t)).strip()
+
+
+def unknown_tokens(fmt: str) -> list[str]:
+    return list(dict.fromkeys(
+        "{" + m.group(0)[1:-1] + "}" for m in _TOKEN.finditer(fmt)
+        if re.sub(r"[- ._]", "", m.group("name")).lower() not in _TOKEN_KEYS))
+
+
+def _multi(fmt: str, season: int, nums: list[int], style: str) -> str:
+    """Put the season/episode numbers in, as Sonarr's multi-episode styles do:
+    extend S01E01-02-03 · duplicate S01E01 - S01E02 · repeat S01E01E02E03 ·
+    scene S01E01-E02-E03 · range S01E01-03 · prefixed_range S01E01-E03."""
+    m = _SE.search(fmt)
+    if not m:
+        return fmt
+    sf, ef, esep = m.group("sf"), m.group("ef"), m.group("esep")
+    first = f"{m.group('s')}{_num(season, sf)}{esep}{_num(nums[0], ef)}"
+    rest = nums[1:]
+    if not rest:
+        out = first
+    elif style == "extend":
+        out = first + "".join(f"-{_num(n, ef)}" for n in rest)
+    elif style == "duplicate":
+        sep = m.group("sep") or " "
+        out = first + "".join(f"{sep}{m.group('s')}{_num(season, sf)}{esep}{_num(n, ef)}" for n in rest)
+    elif style == "repeat":
+        out = first + "".join(f"{esep}{_num(n, ef)}" for n in rest)
+    elif style == "scene":
+        out = first + "".join(f"-{esep}{_num(n, ef)}" for n in rest)
+    elif style == "range":
+        out = f"{first}-{_num(rest[-1], ef)}"
+    else:  # prefixed_range (Sonarr's default)
+        out = f"{first}-{esep}{_num(rest[-1], ef)}"
+    return fmt[:m.start("se")] + out.replace("{", "").replace("}", "") + fmt[m.end("se"):]
+
+
+def render_name(fmt: str, values: dict, season: int | None = None,
+                episodes: list[int] | None = None, style: str = "prefixed_range") -> str:
+    if season is not None and episodes:
+        fmt = _multi(fmt, season, episodes, style)
+
+    def tok(m):
+        name = m.group("name")
+        key = _TOKEN_KEYS.get(re.sub(r"[- ._]", "", name).lower())
+        v = values.get(key) if key else None
+        if isinstance(v, int):
+            v = _num(v, m.group("fmt"))
+        v = "" if v is None else str(v)
+        if not v:
+            return ""
+        if m.group("wsep") and m.group("wsep") != " ":
+            v = v.replace(" ", m.group("wsep"))
+        if " " in name or m.group("wsep"):  # Sonarr: {SERIES TITLE} upper, {series title} lower
+            letters = re.sub(r"[^a-z]", "", name, flags=re.I)
+            v = v.upper() if letters.isupper() else v.lower() if letters.islower() else v
+        return m.group("pre") + v + m.group("post")
+    return _TOKEN.sub(tok, fmt)
+
+
+def _series_values(series_name: str, year, settings: dict) -> dict:
+    year = str(year or "").strip()
+    noyear = re.sub(r"\s*\(\d{4}\)$", "", series_name).strip()
+    with_year = series_name if re.search(r"\(\d{4}\)$", series_name) or not year else f"{series_name} ({year})"
+    c = lambda t: clean_token(t, settings)  # noqa: E731
+    return {"series": c(series_name), "series_year": c(with_year), "series_noyear": c(noyear),
+            "series_clean": c(clean_title(series_name)), "series_clean_year": c(clean_title(with_year)),
+            "series_clean_noyear": c(clean_title(noyear)), "year": year}
 
 
 _MULTI_PART = re.compile(r"(?:\:?\s?(?:\(\d+\)|(Part|Pt\.?)\s?\d+))$", re.I)
@@ -132,28 +221,28 @@ def _episode_title(titles: list[str], max_len: int) -> str:
 
 
 def episode_filename(series_name: str, eps: list[dict], ext: str, original: str,
-                     settings: dict) -> str:
+                     settings: dict, year="") -> str:
     q = QUALITY_RE.search(original)
-    tokens = {
-        "series": clean_token(series_name, settings),
-        "season": eps[0]["season"],
-        "episode": _EpNum([e["episode"] for e in eps], settings["multi_episode_style"]),
-        "title": "",
-        "quality": q.group(1) if q else "",
-        "year": "",
-    }
-    fmt = settings["naming_format"]
-    try:
-        without_title = fmt.format(**tokens)
-    except (KeyError, ValueError, IndexError):
+    style = settings["multi_episode_style"]
+    style = style if style in MULTI_STYLES else "prefixed_range"
+    values = {**_series_values(series_name, year, settings), "season": eps[0]["season"],
+              "episode": eps[0]["episode"], "title": "", "title_clean": "",
+              "quality": q.group(1) if q else ""}
+    fmt = settings["naming_format"] or ""
+    if not _SE.search(fmt):  # no season/episode numbers in it: every file would collide
         fmt = "{series} - S{season:02d}E{episode:02d} - {title}"
-        without_title = fmt.format(**tokens)
+    nums = [e["episode"] for e in eps]
+    without_title = render_name(fmt, values, eps[0]["season"], nums, style)
     # As Sonarr: the title gets whatever is left of a 255-byte file name once the
     # extension and the rest of the name are counted; it is measured before illegal
     # characters are replaced.
     max_len = MAX_NAME_BYTES - _bytes(ext) - _bytes(without_title)
-    tokens["title"] = clean_token(_episode_title(_episode_titles(eps), max_len), settings)
-    name = re.sub(r"\s{2,}", " ", fmt.format(**tokens)).strip(" -")
+    title = _episode_title(_episode_titles(eps), max_len)
+    values["title"] = clean_token(title, settings)
+    values["title_clean"] = clean_token(clean_title(title), settings)
+    name = render_name(fmt, values, eps[0]["season"], nums, style)
+    name = re.sub(r"\[\s*\]|\(\s*\)|\{\s*\}", "", name)  # e.g. "[{Quality Full}]" with no quality known
+    name = re.sub(r"\s{2,}", " ", name).strip(" -")
     name = sanitize(name)
     if _bytes(name) > MAX_NAME_BYTES - _bytes(ext):
         name = _truncate_bytes(name, MAX_NAME_BYTES - _bytes(ext)).rstrip()
@@ -167,7 +256,8 @@ def season_dir(root: Path, season: int, settings: dict, layout: dict) -> Path:
         return layout["season_dirs"][season]
     if season == 0:
         return root / settings["specials_folder"]
-    return root / settings["season_folder_format"].format(season=season)
+    return root / (sanitize(render_name(settings["season_folder_format"], {"season": season}))
+                   or f"Season {season:02d}")
 
 
 def backup_folder_name() -> str:
@@ -401,7 +491,7 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
                               "suggested": codes})
                 continue
             ep_list = [eps[cd] for cd in codes]
-            name = episode_filename(series_name, ep_list, src.suffix, src.name, s)
+            name = episode_filename(series_name, ep_list, src.suffix, src.name, s, series.get("year"))
             dst = season_dir(root, ep_list[0]["season"], s, layout) / name
             dst_rel = str(dst.relative_to(root))
             if dst_rel == rel:
@@ -434,7 +524,7 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
         for seg, cd, strength, is_ai in usable:
             e = eps[cd]
             is_dup = (winner.get(cd, (None,))[0] != rel or winner[cd][1] != seg.get("start", 0))
-            name = episode_filename(series_name, [e], src.suffix, src.name, s)
+            name = episode_filename(series_name, [e], src.suffix, src.name, s, series.get("year"))
             if is_dup:
                 path = f"{backup}/duplicates/{name}"
             else:

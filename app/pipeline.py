@@ -8,7 +8,8 @@ from pathlib import Path
 
 from . import db, fandom, llm, titlecard, tvdb
 from .config import get_settings
-from .executor import apply_plan, migrate_legacy_backup, sonarr_rescan, undo_apply
+from .executor import (apply_plan, migrate_legacy_backup, sonarr_rescan, sonarr_series_type_note,
+                       undo_apply)
 from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import get_dialogue
@@ -189,6 +190,9 @@ def job_scan(ctx, params):
     opts = series.get("options") or {}
     include_specials = bool(opts.get("include_specials"))
     eps = {ep_code(e["season"], e["episode"]): e for e in series["episodes"]}
+    note = sonarr_series_type_note(series)
+    if note:
+        ctx.log(note)
 
     refs = {c: r["text"] for c, r in load_refs(series["tvdb_id"]).items()
             if c in eps and (include_specials or eps[c]["season"] > 0)}
