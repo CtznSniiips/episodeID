@@ -315,6 +315,9 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
                 raise ApplyError(f"Target escapes the series folder: {t['path']}")
 
     _check_space(root, [root / it["source"] for it in items if it["kind"] == "split"])
+    if any(it["kind"] in ("split", "aside") for it in items):
+        backup.mkdir(parents=True, exist_ok=True)
+        mark_backup_folder(root)  # before the media server can see anything land there
 
     apply_id = db.add_apply(series["id"], plan["id"], [])
     log = _Log(apply_id)
@@ -417,6 +420,7 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
         _move(tmp, final, log, root, note)
         ctx.log(f"  → {final.relative_to(root)}")
 
+    mark_backup_folder(root)  # renames may have parked metadata or conflicts there too
     db.update_plan(plan["id"], status="applied", items=plan["items"])
     return {"apply_id": apply_id, "applied": len(items), "operations": len(log.ops)}
 
@@ -455,6 +459,7 @@ def undo_apply(series: dict, apply: dict, ctx) -> dict:
                 parked += 1
     for p in problems:
         ctx.log(f"  ! {p}")
+    mark_backup_folder(root)  # undone pieces are parked there
     db.mark_undone(apply["id"])
     ctx.log(f"Restored {restored} moves; {parked} generated files parked in "
             f"{_rel(backup / 'undone', root)}.")
@@ -515,7 +520,41 @@ def log_info(msg: str) -> None:
 def _walk_files(d: Path):
     for dirpath, dirnames, filenames in os.walk(d, followlinks=False):
         for n in filenames + [x for x in dirnames if os.path.islink(os.path.join(dirpath, x))]:
+            if n in IGNORE_MARKERS:
+                continue  # our "media servers, look away" files aren't backed-up files
             yield Path(dirpath) / n
+
+
+# Files that make media servers skip the backup folder (it sits in the TV library):
+#   .ignore      Jellyfin (an empty file excludes the folder) and Emby 4.8
+#   .embyignore  Emby 4.9+ ("*" ignores everything in the folder)
+#   .plexignore  Plex (patterns relative to this folder; one per depth)
+#   .nomedia     Kodi (and Android media scanners)
+IGNORE_MARKERS = {
+    ".ignore": "",
+    ".embyignore": "# EpisodeID backup folder: keep it out of the library\n*\n",
+    ".plexignore": "# EpisodeID backup folder: keep it out of the library\n"
+                   + "".join("/".join(["*"] * n) + "\n" for n in range(1, 9)),
+    ".nomedia": "",
+}
+
+
+def mark_backup_folder(series_path: str | Path) -> Path | None:
+    """Put the ignore files at the top of the backup folder (<TV>/_episodeid_backup/, or
+    <Show>/_episodeid_backup/ for a series at the top of the media mount). Files that
+    are already there are left as they are, in case you've edited them."""
+    d = backup_root(series_path)
+    top = d.parent if d.parent.name == backup_folder_name() else d
+    if not top.is_dir() or top.is_symlink():
+        return None
+    for name, body in IGNORE_MARKERS.items():
+        f = top / name
+        if not f.exists():
+            try:
+                f.write_text(body)
+            except OSError:
+                pass
+    return top
 
 
 def backup_summary(series: dict) -> dict:

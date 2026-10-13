@@ -457,6 +457,13 @@ def _pick(results: list[dict], want_title: str | None, season: int, episode: int
     return title_ok, hi, named, r
 
 
+def _same_series(r: dict, series: dict) -> bool:
+    fd = (r.get("attributes") or {}).get("feature_details") or {}
+    if series.get("imdb_id") and fd.get("parent_imdb_id"):
+        return str(fd["parent_imdb_id"]).lstrip("t").lstrip("0") == series["imdb_id"].lstrip("t").lstrip("0")
+    return titles_match(fd.get("parent_title") or "", series.get("name") or "")
+
+
 def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dict | None, str]:
     """Returns (ref, note). Raises QuotaExhausted.
 
@@ -492,6 +499,23 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
             p = _pick(res, title, ep["season"], ep["episode"], False, eps, sname)
             if p:
                 pick, how = p, "episode IMDb id"
+    unsure = pick is not None and not pick[0] and pick[2][0] != "match"
+    if pick is None or unsure:
+        # Nothing under this number (IMDb numbers older shows differently, or there are
+        # no IMDb ids), or what's there is titled as another episode: search by title.
+        # IMDb's title alone can mislead (uploaders' files are attached by number), so
+        # when there's already a candidate only a file name carrying this title wins.
+        queries = []
+        if series.get("imdb_id"):
+            queries.append({"parent_imdb_id": series["imdb_id"].lstrip("t"), "query": title})
+        queries.append({"query": f"{sname} {title}".strip(), "type": "episode"})
+        for q in queries:
+            res = os_.search(**q)
+            res = [x for x in res if _same_series(x, series)]
+            p = _pick(res, title, ep["season"], ep["episode"], False, eps, sname)
+            if p and (p[2][0] == "match" or (p[0] and not unsure)):
+                pick, how = p, "episode title"
+                break
     if pick is None:
         return None, "no subtitle found"
     title_ok, _, named, r = pick
@@ -623,6 +647,9 @@ def normalize_page(value: str) -> str:
     return unquote(v).replace("_", " ").strip()
 
 
+LAST_WIKI_ERROR: dict = {}
+
+
 def fandom_page(wiki: str, page: str) -> tuple[str | None, str]:
     """Fetch a wiki page. Returns (text, status) where status is
     "ok", "missing" (the wiki says the page doesn't exist) or "error" (blocked,
@@ -635,14 +662,18 @@ def fandom_page(wiki: str, page: str) -> tuple[str | None, str]:
     with httpx.Client(timeout=30, headers={"User-Agent": BROWSER_UA},
                       follow_redirects=True) as c:
         def get(url, params=None):
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     r = c.get(url, params=params)
-                except httpx.HTTPError:
+                except httpx.HTTPError as e:
                     r = None
+                    LAST_WIKI_ERROR["why"] = type(e).__name__
                 if r is not None and r.status_code not in (402, 403, 429) and r.status_code < 500:
                     return r
-                time.sleep(2 + attempt * 4)  # throttled or flaky: back off and retry
+                if r is not None:
+                    LAST_WIKI_ERROR["why"] = f"HTTP {r.status_code}"
+                if attempt == 0:
+                    time.sleep(3)  # throttled or flaky: one more try
             return r
 
         r = get(api, {"action": "parse", "page": page, "prop": "text", "format": "json",
@@ -846,7 +877,7 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
         return {"fetched": 0, "missing": len(misses)}
 
     os_ = OpenSubtitles()
-    fetched = upgraded = deferred = 0
+    fetched = upgraded = deferred = wiki_fails = 0
     quota_hit = None
     work = [(e, False) for e in todo] + [(e, True) for e in upgrades]
     try:
@@ -868,7 +899,9 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
             ctx.progress(i / len(work), f"References: {code} {ep['title']}")
             ref, note, fandom_status, stub_note = None, "", None, ""
             # Fandom first when configured: it costs no download quota.
-            if wiki:
+            if wiki and wiki_fails >= 3:
+                fandom_status, note = "error", "wiki not answering — will retry next fetch"
+            elif wiki:
                 page = overrides.get(code) or page_map.get(code) or pattern.format(
                     title=ep["title"], season=ep["season"], episode=ep["episode"])
                 text, fandom_status = fandom_page(wiki, page)
@@ -884,7 +917,14 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                         if not is_upgrade and cached and cached.get("source") == "fandom":
                             (refs_dir(tvdb_id) / f"{code}.json").unlink(missing_ok=True)
                 elif fandom_status == "error":
-                    note = f"wiki unreachable for {page} — will retry next fetch"
+                    why = LAST_WIKI_ERROR.get("why") or "no response"
+                    note = f"wiki unreachable for {page} ({why}) — will retry next fetch"
+                    wiki_fails += 1
+                    if wiki_fails == 3:
+                        ctx.log(f"{wiki} isn't answering ({why}) — not asking it again during this "
+                                "fetch" + ("; using OpenSubtitles instead" if os_.configured else ""))
+                if fandom_status != "error":
+                    wiki_fails = 0
 
             if is_upgrade:
                 if ref:
@@ -901,11 +941,14 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                         _save(tvdb_id, code, cur)
                 continue
 
-            if ref is None and fandom_status == "error":
-                # Don't fall back to OpenSubtitles just because the wiki hiccuped.
+            if ref is None and fandom_status == "error" and not os_.configured:
                 deferred += 1
                 ctx.log(f"{code} … {note}")
                 continue
+            if fandom_status == "error":
+                # The wiki didn't answer. OpenSubtitles stands in; a later fetch swaps
+                # in the wiki transcript (the "replace" step) once the wiki responds.
+                note = ""
             os_skipped = os_.configured and quota_hit is not None
             if ref is None and os_.configured and quota_hit is None:
                 try:
@@ -937,6 +980,10 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                             "other references at the end of this fetch — until then "
                             "renames relying on it won't be pre-ticked")
                 ctx.log(f"{code} ✓ {note}{warn}")
+            elif fandom_status == "error":
+                # Not a real miss: the wiki may well have it once it answers again.
+                deferred += 1
+                ctx.log(f"{code} … {note or 'not found on OpenSubtitles'}; wiki didn't answer — will retry next fetch")
             elif not os_skipped and not note.startswith("error"):
                 # Remember real misses so re-runs don't burn quota on them.
                 misses[code] = note or "not found"

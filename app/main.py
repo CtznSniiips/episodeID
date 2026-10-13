@@ -40,6 +40,7 @@ def _startup():
         for sr in db.list_series():
             try:
                 executor.migrate_legacy_backup(db.get_series(sr["id"]))
+                executor.mark_backup_folder(sr["path"])
             except Exception as e:  # noqa: BLE001
                 log.warning("series %s: couldn't move its backup folder: %s", sr.get("id"), e)
     threading.Thread(target=_move_old_backups, name="move-backups", daemon=True).start()

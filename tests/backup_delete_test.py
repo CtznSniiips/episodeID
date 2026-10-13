@@ -53,6 +53,14 @@ assert r["restored"] == 1 and (root / "Season 1" / "b.mkv").exists() and not r["
 (bk / "duplicates" / "link.mkv").symlink_to(outside)          # must remove the link only
 (bk / "duplicates" / "linkdir").symlink_to(root / "Season 1")  # never followed
 c = TestClient(main.app)
+top = executor.mark_backup_folder(root)
+assert top == W / "media" / "tv" / "_episodeid_backup", top
+assert (top / ".ignore").read_text() == "" and (top / ".nomedia").exists()
+assert "*" in (top / ".embyignore").read_text().splitlines() and "*/*/*/*" in (top / ".plexignore").read_text()
+(top / ".plexignore").write_text("my own rules\n")
+executor.mark_backup_folder(root)
+assert (top / ".plexignore").read_text() == "my own rules\n", "an edited file is left alone"
+(bk / ".ignore").write_text("")  # a marker deeper down isn't a backed-up file either
 s = c.get(f"/api/series/{sid}/backup").json()
 print(s["folder"], {b["name"]: (b["files"], b["bytes"]) for b in s["buckets"]})
 assert s["folder"] == "tv/_episodeid_backup/Show", s
@@ -78,5 +86,6 @@ for bad in ("", ".", "..", "../x"):
 assert keep.exists()
 config.save_settings({"backup_folder": "_episodeid_backup"})
 r = c.post(f"/api/series/{sid}/backup/delete", json={"buckets": ["split_originals", "(top level)"], "confirm": "DELETE"}).json()
-assert r["deleted"] == 2 and not bk.exists() and keep.exists(), r
+assert r["deleted"] == 2 and keep.exists(), r
+assert not (bk / "split_originals").exists() and (top / ".embyignore").exists()
 print("PASS")
