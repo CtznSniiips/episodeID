@@ -80,6 +80,8 @@ def handler(req: httpx.Request) -> httpx.Response:
 
 
 fandom._client = lambda: httpx.Client(transport=httpx.MockTransport(handler))
+from app import wikihttp  # noqa: E402
+wikihttp.MIN_INTERVAL = 0
 references.fandom_page = lambda wiki, page: (None, "missing")  # used by the old fallback only
 eps = lambda titles: [{"season": 1 if i < 9 else 4, "episode": i + 1, "title": t}  # noqa: E731
                       for i, t in enumerate(titles)]

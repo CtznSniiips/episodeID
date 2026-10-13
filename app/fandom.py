@@ -19,11 +19,10 @@ from __future__ import annotations
 import difflib
 import html
 import re
-import time
 
 import httpx
 
-from .references import BROWSER_UA
+from . import wikihttp
 
 TRANSCRIPT_CATEGORIES = ("Transcripts", "Episode transcripts", "Transcript",
                          "Episode Transcripts", "Season transcripts")
@@ -35,24 +34,17 @@ _TRANSCRIPT_BITS = re.compile(
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=30, follow_redirects=True, headers={"User-Agent": BROWSER_UA})
+    return wikihttp.client()
 
 
 def _get_json(c: httpx.Client, url: str, params: dict) -> dict | None:
-    for attempt in range(3):
-        try:
-            r = c.get(url, params=params)
-        except httpx.HTTPError:
-            r = None
-        if r is not None and r.status_code == 200:
-            try:
-                return r.json()
-            except ValueError:
-                return None  # HTML, e.g. "this community doesn't exist"
-        if r is not None and 400 <= r.status_code < 500 and r.status_code != 429:
-            return None  # no such wiki (404/410) or not allowed: retrying won't change it
-        time.sleep(1.5 + attempt * 3)  # rate-limited or flaky
-    return None
+    r = wikihttp.get(c, url, params)
+    if r is None or r.status_code != 200:
+        return None  # missing wiki (404/410), blocked, or unreachable
+    try:
+        return r.json()
+    except ValueError:
+        return None  # HTML, e.g. "this community doesn't exist"
 
 
 # ---------------------------------------------------------------- titles

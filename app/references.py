@@ -21,6 +21,7 @@ from pathlib import Path
 
 import httpx
 
+from . import wikihttp
 from . import tvdb
 from .config import CACHE_DIR, CONFIG_DIR, get_settings
 from .media_text import SUB_EXTS, parse_subtitle_text, read_text_file
@@ -647,64 +648,50 @@ def normalize_page(value: str) -> str:
     return unquote(v).replace("_", " ").strip()
 
 
-LAST_WIKI_ERROR: dict = {}
+LAST_WIKI_ERROR = wikihttp.LAST_ERROR
 
 
 def fandom_page(wiki: str, page: str) -> tuple[str | None, str]:
     """Fetch a wiki page. Returns (text, status) where status is
     "ok", "missing" (the wiki says the page doesn't exist) or "error" (blocked,
-    rate-limited or unreachable — worth retrying later, NOT evidence it's missing)."""
+    rate-limited or unreachable — worth retrying later, NOT evidence it's missing).
+    The MediaWiki API is the only thing asked, unless it answers but gives no usable
+    text; then the raw page and the HTML page are tried."""
     wiki = normalize_wiki(wiki)
     page = normalize_page(page)
     host = wiki if "." in wiki else f"{wiki}.fandom.com"
-    api = f"https://{host}/api.php"
-    missing = False
-    with httpx.Client(timeout=30, headers={"User-Agent": BROWSER_UA},
-                      follow_redirects=True) as c:
-        def get(url, params=None):
-            for attempt in range(2):
-                try:
-                    r = c.get(url, params=params)
-                except httpx.HTTPError as e:
-                    r = None
-                    LAST_WIKI_ERROR["why"] = type(e).__name__
-                if r is not None and r.status_code not in (402, 403, 429) and r.status_code < 500:
-                    return r
-                if r is not None:
-                    LAST_WIKI_ERROR["why"] = f"HTTP {r.status_code}"
-                if attempt == 0:
-                    time.sleep(3)  # throttled or flaky: one more try
-            return r
-
-        r = get(api, {"action": "parse", "page": page, "prop": "text", "format": "json",
-                      "redirects": 1})
-        if r is not None and r.status_code == 200:
-            try:
-                j = r.json()
-            except ValueError:
-                j = {}
-            if "parse" in j:
-                text = _strip_html(j["parse"]["text"]["*"])
-                if len(text) > 500:
-                    return text, "ok"
-            elif (j.get("error") or {}).get("code") in ("missingtitle", "invalidtitle"):
-                missing = True
-        r = get(f"https://{host}/index.php", {"title": page, "action": "raw"})
+    with wikihttp.client() as c:
+        r = wikihttp.get(c, f"https://{host}/api.php", {"action": "parse", "page": page, "prop": "text",
+                                                        "format": "json", "redirects": 1})
+        if r is None or r.status_code != 200:
+            if r is not None and r.status_code == 404:
+                return None, "missing"
+            return None, "error"
+        try:
+            j = r.json()
+        except ValueError:
+            j = {}
+        if "parse" in j:
+            text = _strip_html(j["parse"]["text"]["*"])
+            if len(text) > 500:
+                return text, "ok"
+        elif (j.get("error") or {}).get("code") in ("missingtitle", "invalidtitle"):
+            return None, "missing"
+        # The API answered without usable text (odd markup, or not JSON): other views.
+        r = wikihttp.get(c, f"https://{host}/index.php", {"title": page, "action": "raw"})
         if r is not None and r.status_code == 200 and len(r.text) > 500:
             t = re.sub(r"\{\{[^}]*\}\}|\[\[(?:[^|\]]*\|)?([^\]]*)\]\]", r"\1", r.text)
             return re.sub(r"'{2,}|<[^>]+>", "", t), "ok"
-        if r is not None and r.status_code == 404:
-            missing = True
-        r = get(f"https://{host}/wiki/{page.replace(' ', '_')}")
+        r = wikihttp.get(c, f"https://{host}/wiki/{page.replace(' ', '_')}")
         if r is not None and r.status_code == 200:
             m = re.search(r'(?s)<div class="mw-parser-output">(.*?)<div class="printfooter', r.text)
             if m:
                 text = _strip_html(m.group(1))
                 if len(text) > 500:
                     return text, "ok"
-        elif r is not None and r.status_code == 404:
-            missing = True
-    return None, "missing" if missing else "error"
+        if r is not None and r.status_code in wikihttp.BLOCKED or r is None:
+            return None, "error"
+    return None, "missing"
 
 
 def fetch_fandom(wiki: str, page: str) -> str | None:
