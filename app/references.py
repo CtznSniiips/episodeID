@@ -481,12 +481,27 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
     eps = series.get("episodes") or []
     sname = series.get("name") or ""
     pick, how = None, ""
+    tried: list[str] = []  # for the log when nothing is found
+
+    def search(label, **q):
+        res = os_.search(**q)
+        tried.append(f"{label}: {len(res)}")
+        return res
+
     if series.get("imdb_id"):
-        res = os_.search(parent_imdb_id=series["imdb_id"].lstrip("t"),
-                         season_number=ep["season"], episode_number=ep["episode"])
+        res = search("by number", parent_imdb_id=series["imdb_id"].lstrip("t"),
+                     season_number=ep["season"], episode_number=ep["episode"])
         p = _pick(res, title, ep["season"], ep["episode"], True, eps, sname)
         if p:
             pick, how = p, "series + episode number"
+    else:
+        tried.append("no series IMDb id")
+        res = [x for x in search("by name + number", query=sname, season_number=ep["season"],
+                                 episode_number=ep["episode"], type="episode")
+               if _same_series(x, series)]
+        p = _pick(res, title, ep["season"], ep["episode"], True, eps, sname)
+        if p:
+            pick, how = p, "series name + episode number"
     if pick is None:
         imdb_ep = ep.get("imdb_id")
         if imdb_ep is None and ep.get("tvdb_episode_id"):
@@ -496,10 +511,12 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
                 imdb_ep = ""
             ep["imdb_id"] = imdb_ep
         if imdb_ep:
-            res = os_.search(imdb_id=imdb_ep.lstrip("t"))
+            res = search("episode IMDb id", imdb_id=imdb_ep.lstrip("t"))
             p = _pick(res, title, ep["season"], ep["episode"], False, eps, sname)
             if p:
                 pick, how = p, "episode IMDb id"
+        else:
+            tried.append("no episode IMDb id")
     unsure = pick is not None and not pick[0] and pick[2][0] != "match"
     if pick is None or unsure:
         # Nothing under this number (IMDb numbers older shows differently, or there are
@@ -511,14 +528,14 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
             queries.append({"parent_imdb_id": series["imdb_id"].lstrip("t"), "query": title})
         queries.append({"query": f"{sname} {title}".strip(), "type": "episode"})
         for q in queries:
-            res = os_.search(**q)
+            res = search("by title", **q)
             res = [x for x in res if _same_series(x, series)]
             p = _pick(res, title, ep["season"], ep["episode"], False, eps, sname)
             if p and (p[2][0] == "match" or (p[0] and not unsure)):
                 pick, how = p, "episode title"
                 break
     if pick is None:
-        return None, "no subtitle found"
+        return None, "no subtitle found (OpenSubtitles results — " + "; ".join(tried) + ")"
     title_ok, _, named, r = pick
     a = r["attributes"]
     fd = a.get("feature_details") or {}
@@ -873,6 +890,9 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
                 os_.login()
                 if os_.remaining is not None:
                     ctx.log(f"OpenSubtitles: {os_.remaining} downloads remaining today.")
+                elif not os_.token:
+                    ctx.log("OpenSubtitles: searching with the API key only (no username/password "
+                            "set, so downloads may be refused).")
             except OpenSubtitlesAuthError as e:
                 quota_hit = str(e)
                 ctx.log(f"{e} — skipping OpenSubtitles for this fetch. Check Settings → OpenSubtitles.")
