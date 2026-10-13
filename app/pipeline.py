@@ -131,7 +131,8 @@ def _find_wiki(series: dict, ctx, force: bool = False) -> dict:
     elif force or not opts.get("fandom_checked"):
         ctx.status("Looking for a Fandom transcript wiki")
         ctx.log(f"Looking for a Fandom wiki for '{series['name']}'…")
-        found = fandom.discover(series["name"], series["episodes"], ctx)
+        seen: list[str] = []
+        found = fandom.discover(series["name"], series["episodes"], ctx, seen=seen)
         opts["fandom_checked"] = True
         if found:
             opts["fandom_wiki"] = found["wiki"]
@@ -146,7 +147,7 @@ def _find_wiki(series: dict, ctx, force: bool = False) -> dict:
                     f"{regular} episodes have a transcript page — using them before OpenSubtitles.")
         else:
             # Wikis without a transcript category or searchable titles: try the classic layout.
-            slug = detect_fandom_wiki(series["name"], series["episodes"], ctx)
+            slug = detect_fandom_wiki(series["name"], series["episodes"], ctx, slugs=seen)
             if slug:
                 opts["fandom_wiki"] = slug
                 opts["fandom_page_map"] = {}

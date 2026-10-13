@@ -46,7 +46,9 @@ def handler(req: httpx.Request) -> httpx.Response:
     requests.append((host, q.get("list") or q.get("meta")))
     wikis = {"theamazingworldofgumball.fandom.com": ("The Amazing World of Gumball Wiki", "cat"),
              "amazingworldofgumball.fandom.com": ("Some Other Wiki", None),
-             "spongebob.fandom.com": ("Encyclopedia SpongeBobia", "search")}
+             "spongebob.fandom.com": ("Encyclopedia SpongeBobia", "search"),
+             "rubbleandcrew.fandom.com": ("PAW Patrol Wiki", None),
+             "rubble-crew.fandom.com": ("Rubble & Crew Wiki", "pages")}
     if host not in wikis:
         return httpx.Response(200, text="<html>Not a valid community</html>")
     sitename, style = wikis[host]
@@ -66,7 +68,14 @@ def handler(req: httpx.Request) -> httpx.Response:
         hits = SPONGE_PAGES if style == "search" else []
         return httpx.Response(200, json={"query": {"search": [{"title": t} for t in hits]}})
     if q.get("list") == "allpages":
-        return httpx.Response(200, json={"query": {"allpages": []}})
+        if style != "pages" or q.get("apprefix"):
+            return httpx.Response(200, json={"query": {"allpages": []}})
+        if "apcontinue" not in q:  # one transcript, in no category, not found by search
+            return httpx.Response(200, json={"query": {"allpages": [{"title": "Rubble"}, {"title": "Mix"}]},
+                                             "continue": {"apcontinue": "T", "continue": "-||"}})
+        return httpx.Response(200, json={"query": {"allpages": [
+            {"title": "The Crew Builds a Bridge"}, {"title": "The Crew Builds a Bridge/Transcript"},
+            {"title": "Transcripts"}]}})
     return httpx.Response(404)
 
 
@@ -100,6 +109,17 @@ print("spongebob:", s and {k: v for k, v in s.items() if k != "page_map"})
 assert s["wiki"] == "spongebob" and s["mapped"] == 6 and s["pattern"] == "Transcript:{title}"
 
 assert fandom.discover("Some Obscure Drama", eps(["Pilot", "Second"])) is None
+
+# Rubble & Crew: a small wiki named after the show, one transcript page found only by
+# listing every page. Its own wiki is enough with one transcript; the PAW Patrol wiki isn't.
+rub = [{"season": 1, "episode": i + 1, "title": t} for i, t in enumerate(
+    ["The Crew Builds a Bridge", "The Crew Builds a Pool"] + [f"The Crew Builds Thing {n}" for n in range(40)])]
+seen = []
+r = fandom.discover("Rubble & Crew", rub, seen=seen)
+print("rubble:", r, seen)
+assert r and r["wiki"] == "rubble-crew" and r["page_map"] == {"S01E01": "The Crew Builds a Bridge/Transcript"}, r
+assert seen[0] == "rubble-crew" and "rubbleandcrew" in seen, seen
+assert fandom._same_show("Rubble & Crew Wiki", "Rubble and Crew (2023)") and not fandom._same_show("PAW Patrol Wiki", "Rubble & Crew")
 
 # --- end to end: discovery on fetch, then references come from the mapped pages
 fetched = []

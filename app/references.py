@@ -546,16 +546,26 @@ def fetch_fandom(wiki: str, page: str) -> str | None:
     return fandom_page(wiki, page)[0]
 
 
-def detect_fandom_wiki(series_name: str, episodes: list[dict], ctx=None) -> str | None:
-    """Guess <slug>.fandom.com from the series name and confirm it really hosts
-    "{title}/Transcript" pages by fetching one for an early episode and checking
-    it reads like a speaker-labelled transcript (so a generic "wiki not found"
-    page can't be mistaken for one)."""
-    name = re.sub(r"\(\d{4}\)|\[[^\]]*\]|\{[^}]*\}", " ", series_name or "").lower()
-    base = re.sub(r"[^a-z0-9]+", "", name)
-    slugs = list(dict.fromkeys(s for s in (base, re.sub(r"^the", "", base)) if len(s) >= 3))
-    probes = [e for e in episodes if e["season"] >= 1 and e.get("title")][:3]
-    for slug in slugs:
+def detect_fandom_wiki(series_name: str, episodes: list[dict], ctx=None,
+                       slugs: list[str] | None = None) -> str | None:
+    """Confirm a wiki really hosts "{title}/Transcript" pages by fetching a few for
+    episodes and checking they read like speaker-labelled transcripts (so a generic
+    "wiki not found" page can't be mistaken for one). `slugs`: wikis known to exist;
+    otherwise guessed from the series name."""
+    if slugs is None:
+        name = re.sub(r"\(\d{4}\)|\[[^\]]*\]|\{[^}]*\}", " ", series_name or "").lower()
+        base = re.sub(r"[^a-z0-9]+", "", name)
+        slugs = list(dict.fromkeys(s for s in (base, re.sub(r"^the", "", base)) if len(s) >= 3))
+    regular = [e for e in episodes if e["season"] >= 1 and e.get("title")]
+    # the first few episodes of each season: small wikis tend to start at the beginning
+    probes, per_season = [], {}
+    for e in sorted(regular, key=lambda e: (e["season"], e["episode"])):
+        if per_season.get(e["season"], 0) < 2 and len(probes) < 6:
+            per_season[e["season"]] = per_season.get(e["season"], 0) + 1
+            probes.append(e)
+    for slug in slugs[:3]:
+        if ctx:
+            ctx.log(f"  {slug}: trying '<episode title>/Transcript' pages for {len(probes)} episodes")
         for ep in probes:
             try:
                 text = fetch_fandom(slug, f"{ep['title']}/Transcript")

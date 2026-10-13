@@ -154,9 +154,24 @@ def site_info(c: httpx.Client, wiki: str) -> dict | None:
     return gen or None
 
 
+def _is_transcript(title: str) -> bool:
+    return bool(_TRANSCRIPT_BITS.search(title)) and title.strip().lower() not in ("transcript", "transcripts")
+
+
 def list_transcript_pages(c: httpx.Client, wiki: str, limit: int = 3000) -> tuple[list[str], str]:
-    """All transcript page titles on a wiki, and how they were found."""
+    """All transcript page titles on a wiki, and how they were found. Every method is
+    tried and the results combined: small wikis often have only a few transcripts,
+    not always in a category, and Fandom's title search doesn't always find them."""
     api = f"https://{wiki_host(wiki)}/api.php"
+    found: dict[str, None] = {}
+    how: list[str] = []
+
+    def add(titles, label):
+        new = [t for t in titles if t not in found]
+        if new:
+            found.update(dict.fromkeys(new))
+            how.append(label)
+
     for cat in TRANSCRIPT_CATEGORIES:
         pages, cont = [], {}
         while len(pages) < limit:
@@ -169,50 +184,75 @@ def list_transcript_pages(c: httpx.Client, wiki: str, limit: int = 3000) -> tupl
             cont = j.get("continue") or {}
             if not cont:
                 break
-        if len(pages) >= 3:
-            return pages, f"Category:{cat}"
-    # Title search (finds "X/Transcript", "Transcript:X", "X (transcript)")
-    pages, offset = [], 0
-    while len(pages) < limit:
-        j = _get_json(c, api, {"action": "query", "list": "search", "srsearch": "transcript",
-                               "srwhat": "title", "srlimit": "500", "sroffset": offset,
-                               "format": "json"})
-        hits = ((j or {}).get("query") or {}).get("search", [])
-        pages += [h["title"] for h in hits if "transcript" in h["title"].lower()]
-        nxt = ((j or {}).get("continue") or {}).get("sroffset")
-        if not hits or nxt is None:
-            break
-        offset = nxt
-    if len(pages) >= 3:
-        return pages, "title search"
-    # Prefix listing ("Transcript:..." pages in the main namespace)
-    j = _get_json(c, api, {"action": "query", "list": "allpages", "apprefix": "Transcript",
-                           "aplimit": "500", "format": "json"})
-    pages = [p["title"] for p in ((j or {}).get("query") or {}).get("allpages", [])]
-    return pages, "page prefix"
+        add(pages, f"Category:{cat}")
+        if len(pages) >= 20:
+            break  # a real transcript category; no need to look further
+    if len(found) < 20:
+        # Title search (finds "X/Transcript", "Transcript:X", "X (transcript)")
+        pages, offset = [], 0
+        while len(pages) < limit:
+            j = _get_json(c, api, {"action": "query", "list": "search", "srsearch": "transcript",
+                                   "srwhat": "title", "srlimit": "500", "sroffset": offset,
+                                   "format": "json"})
+            hits = ((j or {}).get("query") or {}).get("search", [])
+            pages += [h["title"] for h in hits if "transcript" in h["title"].lower()]
+            nxt = ((j or {}).get("continue") or {}).get("sroffset")
+            if not hits or nxt is None:
+                break
+            offset = nxt
+        add(pages, "title search")
+    if len(found) < 20:
+        # Every page on the wiki, keeping the transcript ones ("X/Transcript" subpages
+        # aren't found by a prefix and are often in no category). Small wikis only.
+        pages, cont, seen = [], {}, 0
+        while seen < 10000:
+            j = _get_json(c, api, {"action": "query", "list": "allpages", "aplimit": "500",
+                                   "format": "json", **cont})
+            batch = [p["title"] for p in ((j or {}).get("query") or {}).get("allpages", [])]
+            seen += len(batch)
+            pages += [t for t in batch if _is_transcript(t)]
+            cont = (j or {}).get("continue") or {}
+            if not batch or not cont:
+                break
+        add(pages, "page list")
+    return list(found), " + ".join(how) or "nothing found"
+
+
+def _same_show(sitename: str, series_name: str) -> bool:
+    """"Rubble & Crew Wiki" is about "Rubble & Crew"."""
+    a = norm_ep(re.sub(r"(?i)\b(wiki|fandom|encyclopedia|database)\b", "", sitename or ""))
+    b = norm_ep(re.sub(r"\(\d{4}\)", "", series_name or ""))
+    return bool(a and b) and a.replace(" ", "") == b.replace(" ", "")
 
 
 def discover(series_name: str, episodes: list[dict], ctx=None,
-             min_share: float = 0.15, min_pages: int = 5) -> dict | None:
+             min_share: float = 0.15, min_pages: int = 5, seen: list | None = None) -> dict | None:
     """Find the wiki and map episodes to transcript pages.
-    Returns {"wiki", "sitename", "page_map", "pattern", "mapped", "found_via"} or None."""
+    Returns {"wiki", "sitename", "page_map", "pattern", "mapped", "found_via"} or None;
+    `seen` gets the wikis that exist, ones named after the series first. A wiki named after the series is accepted with any transcripts at all;
+    another wiki only if a good share of the series' episodes have a page on it."""
     regular = [e for e in episodes if e["season"] >= 1]
     need = max(min_pages, int(min_share * len(regular))) if regular else min_pages
-    best = None
+    best, existing = None, []
     with _client() as c:
         for slug in slug_candidates(series_name):
             info = site_info(c, slug)
             if not info:
                 continue
+            same = _same_show(info.get("sitename"), series_name)
+            existing.append((slug, same))
             pages, how = list_transcript_pages(c, slug)
             mapping = map_pages(regular, pages) if pages else {}
             if ctx:
                 ctx.log(f"  {slug}.fandom.com ({info.get('sitename')}): {len(pages)} transcript "
-                        f"pages, {len(mapping)} match episodes of this series")
-            if len(mapping) >= need and (best is None or len(mapping) > len(best["page_map"])):
+                        f"pages ({how}), {len(mapping)} match episodes of this series")
+            ok = len(mapping) >= need or (same and mapping)
+            if ok and (best is None or len(mapping) > len(best["page_map"])):
                 best = {"wiki": slug, "sitename": info.get("sitename"), "page_map": mapping,
                         "pattern": infer_pattern(mapping, regular), "mapped": len(mapping),
                         "found_via": how}
                 if len(mapping) >= 0.8 * len(regular):
                     break  # good enough; don't keep probing
+    if seen is not None:
+        seen += [s for s, same in sorted(existing, key=lambda x: not x[1])]
     return best
