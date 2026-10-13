@@ -49,8 +49,8 @@ def _get_json(c: httpx.Client, url: str, params: dict) -> dict | None:
                 return r.json()
             except ValueError:
                 return None  # HTML, e.g. "this community doesn't exist"
-        if r is not None and r.status_code == 404:
-            return None
+        if r is not None and 400 <= r.status_code < 500 and r.status_code != 429:
+            return None  # no such wiki (404/410) or not allowed: retrying won't change it
         time.sleep(1.5 + attempt * 3)  # rate-limited or flaky
     return None
 
@@ -131,10 +131,13 @@ def slug_candidates(series_name: str) -> list[str]:
     if not words:
         return []
     no_the = words[1:] if words[0] in ("the", "a", "an") and len(words) > 1 else words
-    c = ["".join(words), "".join(no_the), "-".join(words), "-".join(no_the)]
-    if len(no_the) > 1:
-        c += [no_the[0], "".join(no_the[:2]), "-".join(no_the[:2])]
-    c += [x + "wiki" for x in ("".join(no_the),)]
+    # "Rubble & Crew" → rubble-crew.fandom.com: wikis often drop the "and"
+    no_and = [w for w in no_the if w != "and"] or no_the
+    c = ["".join(words), "".join(no_the), "-".join(words), "-".join(no_the),
+         "-".join(no_and), "".join(no_and)]
+    if len(no_and) > 1:
+        c += [no_and[0], "".join(no_and[:2]), "-".join(no_and[:2])]
+    c += [x + "wiki" for x in ("".join(no_the), "".join(no_and))]
     return [s for s in dict.fromkeys(c) if len(s) >= 3 and s not in ("the", "and", "show")]
 
 
