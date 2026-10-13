@@ -1110,7 +1110,16 @@ async function renderSettings() {
     ${f("min_score", "Minimum score", "TF-IDF cosine similarity a confident match must reach.")}
     ${f("min_margin", "Minimum margin", "How far the best match must beat the runner-up.")}</fieldset>
   <div class="row"><div class="spacer"></div><button class="btn primary" type="submit">Save settings</button></div>
-  </form>`;
+  </form>
+  <form class="settings"><fieldset><legend>Cache</legend>
+    <p class="muted small" style="margin-top:0">Dialogue, title-card OCR and preview pictures are kept so files aren't read twice.
+      They follow a file through renames; a replaced file gets new entries and the old ones stay behind.
+      <em>Clear unused</em> deletes entries for files that are no longer in any series (or its backup folder) and all preview
+      pictures. Whisper models and downloaded references aren't touched.</p>
+    <div id="cache-info" class="small muted">Measuring…</div>
+    <div class="row" style="justify-content:flex-end"><span class="small muted" id="cache-out"></span>
+      <button class="btn small" type="button" id="cache-prune">Clear unused cache</button></div>
+  </fieldset></form>`;
 
   const form = $("#settings");
   const collect = () => {
@@ -1125,6 +1134,19 @@ async function renderSettings() {
     e.preventDefault();
     try { await api("/api/settings", { method: "PUT", body: collect() }); toast("Settings saved"); refreshChips(); }
     catch (err) { fail(err); }
+  };
+  const showCache = (c) => {
+    $("#cache-info").innerHTML = c.kinds.map((k) => `${esc(k.label)}: ${k.files} files, ${fmtBytes(k.bytes)}`).join("<br>");
+  };
+  api("/api/cache").then(showCache).catch(() => { $("#cache-info").textContent = ""; });
+  $("#cache-prune").onclick = async () => {
+    const out = $("#cache-out");
+    out.textContent = "Checking every series…";
+    try {
+      const r = await api("/api/cache/prune", { method: "POST" });
+      out.textContent = `Removed ${r.deleted} files (${fmtBytes(r.bytes)}); kept what ${r.videos} videos use.`;
+      showCache(r);
+    } catch (err) { out.textContent = err.message; }
   };
   $("#naming-import").onclick = async () => {
     const out = $("#naming-import-out");

@@ -576,6 +576,24 @@ def backup_delete(sid: int, body: BackupDeleteReq):
     return r
 
 
+@app.get("/api/cache")
+def cache_info():
+    return executor.cache_summary()
+
+
+@app.post("/api/cache/prune")
+def cache_prune():
+    busy = [s["name"] for s in db.list_series() if db.active_job(s["id"])]
+    if busy:
+        raise HTTPException(409, f"A job is running ({busy[0]}) — try again when it's finished")
+    try:
+        r = executor.prune_cache()
+    except executor.ApplyError as e:
+        raise HTTPException(400, str(e)) from e
+    log.info("cache: removed %s unused files (%s bytes)", r["deleted"], r["bytes"])
+    return {**r, **executor.cache_summary()}
+
+
 class CardCheckReq(BaseModel):
     source: str
     start: float = 0

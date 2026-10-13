@@ -651,3 +651,66 @@ def sonarr_rescan(series: dict, ctx) -> None:
         ctx.log(f"Sonarr: rescan queued for '{found[0].get('title')}'.")
     except Exception as e:  # noqa: BLE001
         ctx.log(f"Sonarr rescan failed: {e}")
+
+
+# --------------------------------------------------------------------- cache
+
+CACHE_KINDS = {"text": "Dialogue (subtitles / Whisper)", "titlecards": "Title-card OCR",
+               "frames": "Split preview pictures"}
+
+
+def _cache_files():
+    from .config import CACHE_DIR
+    for kind in CACHE_KINDS:
+        d = CACHE_DIR / kind
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.is_file() and not f.is_symlink():
+                    yield kind, f
+
+
+def cache_summary() -> dict:
+    out = {k: {"name": k, "label": v, "files": 0, "bytes": 0} for k, v in CACHE_KINDS.items()}
+    for kind, f in _cache_files():
+        out[kind]["files"] += 1
+        out[kind]["bytes"] += f.stat().st_size
+    return {"kinds": list(out.values()), "bytes": sum(k["bytes"] for k in out.values())}
+
+
+def prune_cache() -> dict:
+    """Delete cached dialogue and title-card OCR for files that no longer exist (or were
+    replaced: the cache is keyed by size + modified time), and all split preview
+    pictures (they're quick to make again). Files in every series folder and its backup
+    folder count as in use. Refuses if a series folder can't be found — an unmounted
+    share would otherwise look like every file was gone."""
+    from .media_text import VIDEO_EXTS, _cache_key
+    from .planner import list_videos
+    series = [db.get_series(s["id"]) for s in db.list_series()]
+    missing = [s["name"] for s in series if not Path(s["path"]).is_dir()]
+    if missing:
+        raise ApplyError("Can't find the folder of " + ", ".join(missing[:5]) +
+                         " — is the share mounted? Nothing was deleted.")
+    live: set[str] = set()
+    for s in series:
+        root = Path(s["path"])
+        vids = list_videos(root, backup_folder_name())
+        b = backup_root(root)
+        if b.is_dir():
+            vids += [p for p in b.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
+        for v in vids:
+            try:
+                live.add(_cache_key(v))
+            except OSError:
+                pass
+    deleted, freed = 0, 0
+    for kind, f in list(_cache_files()):
+        key = f.stem.split("_")[0]
+        if kind != "frames" and key in live:
+            continue
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            deleted, freed = deleted + 1, freed + size
+        except OSError:
+            pass
+    return {"deleted": deleted, "bytes": freed, "videos": len(live)}

@@ -80,7 +80,7 @@ Volumes:
 |---|---|
 | `/media/...` | Your TV library (read-write). Mount one or more folders under `/media`. |
 | `/config` | Settings, SQLite database, manually uploaded references |
-| `/cache` | Downloaded references, extracted subtitles/transcripts, Whisper models |
+| `/cache` | Downloaded references, extracted subtitles/transcripts, title-card OCR, Whisper models. Dialogue and OCR are keyed by each file's size and modified time, so they follow renames and a replaced file is read again. *Settings → Cache → Clear unused cache* removes entries for files no longer in any series. |
 
 `PUID`/`PGID` default to Unraid's `99:100`. An Unraid template is in `unraid/episodeid.xml`.
 
