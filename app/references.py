@@ -377,9 +377,62 @@ class OpenSubtitles:
             return raw.content.decode("latin-1")
 
 
+_CODE_IN_NAME = re.compile(r"(?i)\bs(\d{1,2})[ ._-]?e(\d{1,3})(?:[ ._-]?e?\d{1,3})*\b|\b(\d{1,2})x(\d{2,3})\b")
+
+
+def _name_words(t: str) -> str:
+    t = html.unescape(t or "").lower().replace("&", " and ").replace("'", "").replace("’", "")
+    return " " + re.sub(r"[^a-z0-9]+", " ", t).strip() + " "
+
+
+def subtitle_names(r: dict) -> list[str]:
+    """The release name and file names an uploader gave a subtitle (usually the video
+    file's name, e.g. "Paw.Patrol.S06E31.Pups.Save.the.Bears.1080p.WEB-DL")."""
+    a = r.get("attributes") or {}
+    names = [a.get("release") or ""] + [f.get("file_name") or "" for f in a.get("files") or []]
+    return [n for n in dict.fromkeys(n.strip() for n in names) if n]
+
+
+def name_check(names: list[str], episodes: list[dict], code: str, series_name: str = "") -> tuple[str | None, str | None, str]:
+    """What the subtitle's own file name says about which episode it is.
+    ("match", None, name) when it carries this episode's TVDB title; ("other", code,
+    name) when it carries another episode's title instead; (None, None, "") when it
+    names no episode title (most names have only the number)."""
+    want = None
+    titled = []
+    for e in episodes:
+        t = _name_words(re.sub(r"\(\d+\)\s*$", "", e.get("title") or ""))
+        c = f"S{e['season']:02d}E{e['episode']:02d}"
+        if c == code:
+            want = t
+        # too short or generic to recognise inside a file name ("Rain", "Pilot")
+        if len(t.strip()) >= 8 or (c == code and len(t.strip()) >= 4):
+            titled.append((c, t))
+    series_words = _name_words(series_name).strip()
+    for name in names:
+        text = re.sub(r"\.[a-z0-9]{2,4}$", "", name, flags=re.I)
+        m = _CODE_IN_NAME.search(text)
+        after = text[m.end():] if m else text   # the title follows the number
+        w = _name_words(after)
+        if series_words and not m:
+            w = w.replace(" " + series_words + " ", " ")
+        hits = sorted(((len(t), c, t) for c, t in titled if t in w), reverse=True)
+        if not hits:
+            continue
+        _n, best, best_t = hits[0]
+        mine = next((t for _n, c, t in hits if c == code), None)
+        # this episode's title, unless it's only there as part of a longer title
+        # ("Pups Save a Hoot" inside "Pups Save a Hoot Again")
+        if best == code or (mine and (mine not in best_t or w.count(mine) > 1)):
+            return "match", None, name
+        return "other", best, name
+    return None, None, ""
+
+
 def _pick(results: list[dict], want_title: str | None, season: int, episode: int,
-          check_numbers: bool) -> dict | None:
-    good = []
+          check_numbers: bool, episodes: list[dict] | None = None, series_name: str = "") -> dict | None:
+    good, skipped = [], 0
+    code = f"S{season:02d}E{episode:02d}"
     for r in results:
         a = r.get("attributes") or {}
         fd = a.get("feature_details") or {}
@@ -390,12 +443,18 @@ def _pick(results: list[dict], want_title: str | None, season: int, episode: int
         if check_numbers and (fd.get("season_number") != season or
                               fd.get("episode_number") != episode):
             continue
+        named = name_check(subtitle_names(r), episodes or [], code, series_name)
+        if named[0] == "other":
+            skipped += 1  # its own file name says it's a different episode
+            continue
         title_ok = want_title is None or titles_match(fd.get("title") or "", want_title)
-        good.append((title_ok, not a.get("hearing_impaired"), a.get("download_count") or 0, r))
+        good.append((title_ok or named[0] == "match", named[0] == "match", not a.get("hearing_impaired"),
+                     a.get("download_count") or 0, r, named))
     if not good:
         return None
-    good.sort(key=lambda g: (g[0], g[1], g[2]), reverse=True)
-    return good[0]
+    good.sort(key=lambda g: g[:4], reverse=True)
+    title_ok, _m, hi, _n, r, named = good[0]
+    return title_ok, hi, named, r
 
 
 def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dict | None, str]:
@@ -406,14 +465,18 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
     shows where IMDb orders episodes differently (Gumball's paired episodes, for
     one), looking a subtitle up by IMDb id or by title returns the neighbouring
     episode's dialogue. So: search by TVDB season/episode first, and flag any
-    reference where IMDb's numbering disagrees so the planner treats it with care."""
+    reference where IMDb's numbering disagrees so the planner treats it with care.
+    The subtitle's own file name settles it when it carries an episode title: this
+    episode's title verifies it, another episode's title rules it out."""
     code = ep_code(ep["season"], ep["episode"])
     title = ep["title"]
+    eps = series.get("episodes") or []
+    sname = series.get("name") or ""
     pick, how = None, ""
     if series.get("imdb_id"):
         res = os_.search(parent_imdb_id=series["imdb_id"].lstrip("t"),
                          season_number=ep["season"], episode_number=ep["episode"])
-        p = _pick(res, title, ep["season"], ep["episode"], check_numbers=True)
+        p = _pick(res, title, ep["season"], ep["episode"], True, eps, sname)
         if p:
             pick, how = p, "series + episode number"
     if pick is None:
@@ -426,22 +489,26 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
             ep["imdb_id"] = imdb_ep
         if imdb_ep:
             res = os_.search(imdb_id=imdb_ep.lstrip("t"))
-            p = _pick(res, title, ep["season"], ep["episode"], check_numbers=False)
+            p = _pick(res, title, ep["season"], ep["episode"], False, eps, sname)
             if p:
                 pick, how = p, "episode IMDb id"
     if pick is None:
         return None, "no subtitle found"
-    title_ok, _, _, r = pick
+    title_ok, _, named, r = pick
     a = r["attributes"]
     fd = a.get("feature_details") or {}
     os_number = f"S{fd.get('season_number') or 0:02d}E{fd.get('episode_number') or 0:02d}"
     conflict = bool(fd.get("episode_number")) and os_number != code or not title_ok
-    os_title_code = title_code(series.get("episodes") or [], fd.get("title") or "")
+    if named[0] == "match":
+        conflict = False  # the file name carries this episode's TVDB title
+    os_title_code = title_code(eps, fd.get("title") or "")
     raw = os_.download(a["files"][0]["file_id"])
     cues = parse_subtitle_text(raw, ".srt")
     text = " ".join(c.text for c in cues)
     if len(text) < 200:
         return None, "downloaded subtitle was empty"
+    if named[0] == "match":
+        how += f"; file name confirms the title ({named[2]})"
     return {
         "source": "opensubtitles",
         "text": text,
@@ -452,7 +519,74 @@ def fetch_opensubs(os_: OpenSubtitles, series: dict, ep: dict, ctx) -> tuple[dic
         "numbering_conflict": conflict,
         "os_title_code": os_title_code,
         "subtitle_id": r.get("id"),
+        "release_name": named[2] or (subtitle_names(r) or [""])[0],
+        "name_verified": named[0] == "match",
+        "names_checked": True,
     }, how
+
+
+def check_release_names(series: dict, ctx) -> dict:
+    """For OpenSubtitles references that aren't trusted yet, look the subtitle up again
+    (a search, no download quota) and read its file name: this episode's title there
+    verifies it; another episode's title means it's that episode's dialogue."""
+    tvdb_id = series["tvdb_id"]
+    todo = {c: r for c, r in load_refs(tvdb_id).items()
+            if is_low_trust(r) and r.get("subtitle_id") and not r.get("names_checked")}
+    out = {"verified": 0, "removed": 0, "checked": 0}
+    if not todo:
+        return out
+    os_ = OpenSubtitles()
+    if not os_.configured:
+        return out
+    eps = series.get("episodes") or []
+    by_code = {ep_code(e["season"], e["episode"]): e for e in eps}
+    misses = _load_misses(tvdb_id)
+    try:
+        for code, r in sorted(todo.items()):
+            ctx.check_cancel()
+            e = by_code.get(code)
+            if not e:
+                continue
+            found = None
+            try:
+                searches = []
+                if series.get("imdb_id"):
+                    searches.append({"parent_imdb_id": series["imdb_id"].lstrip("t"),
+                                     "season_number": e["season"], "episode_number": e["episode"]})
+                if e.get("imdb_id"):
+                    searches.append({"imdb_id": e["imdb_id"].lstrip("t")})
+                for q in searches:
+                    found = next((x for x in os_.search(**q) if str(x.get("id")) == str(r["subtitle_id"])), None)
+                    if found:
+                        break
+            except OpenSubtitlesAuthError as ex:
+                ctx.log(f"{ex} — skipped checking subtitle file names.")
+                break
+            except Exception as ex:  # noqa: BLE001
+                ctx.log(f"{code}: couldn't look up its subtitle's file name ({ex})")
+                continue
+            out["checked"] += 1
+            r["names_checked"] = True
+            if found:
+                verdict, other, name = name_check(subtitle_names(found), eps, code, series.get("name") or "")
+                r["release_name"] = name or (subtitle_names(found) or [""])[0]
+                if verdict == "match":
+                    r.update(numbering_conflict=False, name_verified=True,
+                             verified=f"its file name carries the title: {name}")
+                    out["verified"] += 1
+                    ctx.log(f"{code} ✓ verified: the subtitle's file name carries '{e['title']}' ({name})")
+                elif verdict == "other":
+                    (refs_dir(tvdb_id) / f"{code}.json").unlink(missing_ok=True)
+                    misses[code] = f"OpenSubtitles' subtitle for {code} is named for {other} ({name})"
+                    out["removed"] += 1
+                    ctx.log(f"{code} ✗ the subtitle's file name says it's {other} "
+                            f"'{by_code[other]['title']}' ({name}) — discarded")
+                    continue
+            _save(tvdb_id, code, r)
+    finally:
+        os_.close()
+    _save_misses(tvdb_id, misses)
+    return out
 
 
 # ------------------------------------------------------------------ Fandom

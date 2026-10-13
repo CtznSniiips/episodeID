@@ -16,7 +16,7 @@ from .media_text import get_dialogue
 from .planner import build_plan, list_videos
 from .references import (SAME_EPISODE_SCORE, detect_fandom_wiki, ep_code, load_refs, norm_title,
                          refresh_references, renumber_references,
-                         verify_flagged)
+                         verify_flagged, check_release_names)
 
 
 def _series(ctx) -> dict:
@@ -178,6 +178,7 @@ def job_fetch_refs(ctx, params):
                                 retry_misses=bool(params.get("retry_misses")),
                                 retry_codes=retry)
     ctx.status("Cross-checking flagged OpenSubtitles references")
+    result["names"] = check_release_names(db.get_series(series["id"]), ctx)
     result["verification"] = verify_flagged(db.get_series(series["id"]), ctx)
     db.update_series(series["id"], episodes=series["episodes"])  # cached IMDb ids
     return result
