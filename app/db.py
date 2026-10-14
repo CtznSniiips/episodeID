@@ -182,6 +182,19 @@ def get_plan(plan_id: int) -> dict | None:
     return _row(r, ("items",))
 
 
+def latest_plan_summary(series_id: int) -> dict | None:
+    """Item counts by kind for the latest plan, without loading the items."""
+    r = conn().execute("SELECT id, created, status FROM plans WHERE series_id=? ORDER BY id DESC LIMIT 1",
+                       (series_id,)).fetchone()
+    if r is None:
+        return None
+    kinds = conn().execute(
+        "SELECT json_extract(j.value, '$.kind') AS k, count(*) AS n FROM plans p, json_each(p.items) j "
+        "WHERE p.id=? GROUP BY k", (r["id"],)).fetchall()
+    return {"id": r["id"], "created": r["created"], "status": r["status"],
+            "kinds": {k["k"]: k["n"] for k in kinds if k["k"]}}
+
+
 def latest_plan(series_id: int) -> dict | None:
     r = conn().execute("SELECT * FROM plans WHERE series_id=? ORDER BY id DESC LIMIT 1",
                        (series_id,)).fetchone()

@@ -149,9 +149,7 @@ async function renderHome() {
   } else {
     html += `<div class="grid" style="margin-top:16px">` + list.map((s) => {
       const pct = s.episode_count ? Math.round(100 * s.reference_count / s.episode_count) : 0;
-      const counts = s.last_scan ? Object.entries(s.last_scan.counts).map(([k, v]) =>
-        `<span class="badge ${STATUS_BADGE[k] || ""}">${esc(k)} ${v}</span>`).join("") :
-        `<span class="muted small">Not scanned yet</span>`;
+      const counts = seriesCardCounts(s);
       return `<div class="card series-card" data-id="${s.id}">
         <div class="name">${esc(s.name)} <span class="muted">${esc(s.year)}</span></div>
         <div class="path muted">${esc(s.path)}</div>
@@ -165,6 +163,22 @@ async function renderHome() {
   view.innerHTML = html;
   $("#add").onclick = () => addSeriesDialog();
   $$(".series-card").forEach((c) => c.onclick = () => location.hash = `#/series/${c.dataset.id}`);
+}
+
+function seriesCardCounts(s) {
+  if (!s.last_scan) return `<span class="muted small">Not scanned yet</span>`;
+  const scanTip = "Last scan: " + Object.entries(s.last_scan.counts).map(([k, v]) => `${k} ${v}`).join(", ");
+  const k = (s.plan && s.plan.kinds) || null;
+  if (!k) return Object.entries(s.last_scan.counts).map(([n, v]) =>
+    `<span class="badge ${STATUS_BADGE[n] || ""}">${esc(n)} ${v}</span>`).join("");
+  const ok = k.ok || 0, review = k.review || 0;
+  const changes = (k.rename || 0) + (k.split || 0) + (k.aside || 0);
+  if (!changes && !review) {
+    return `<span class="badge b-ok" title="${esc(scanTip)}">✓ All ${ok} file${ok === 1 ? "" : "s"} correct</span>`;
+  }
+  return [ok ? `<span class="badge b-ok" title="${esc(scanTip)}">${ok} correct</span>` : "",
+    changes ? `<span class="badge b-warn">${changes} to change</span>` : "",
+    review ? `<span class="badge b-bad">${review} to review</span>` : ""].join("");
 }
 
 async function addSeriesDialog() {

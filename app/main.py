@@ -418,6 +418,10 @@ def _series_out(s: dict, full: bool = False) -> dict:
     out["active_job"] = db.active_job(s["id"])
     scan = db.latest_scan_summary(s["id"])
     out["last_scan"] = {"created": scan["created"], "counts": scan["counts"]} if scan else None
+    plan = db.latest_plan_summary(s["id"])
+    # the plan is the verdict (title cards, overrides and applied changes included);
+    # only shown when it was made from the latest scan or after it
+    out["plan"] = plan if plan and (not scan or plan["created"] >= scan["created"]) else None
     if full:
         misses = _load_misses(s["tvdb_id"])
         out["episodes"] = [{
