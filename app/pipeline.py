@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import autocheck
 from . import db, fandom, llm, titlecard, tvdb
 from .config import get_settings
 from .executor import (apply_plan, migrate_legacy_backup, sonarr_rescan, sonarr_series_type_note,
@@ -256,6 +257,8 @@ def job_scan(ctx, params):
     items = build_plan(db.get_series(series["id"]), db.latest_scan(series["id"])["results"])
     plan_id = db.add_plan(series["id"], scan_id, items)
     ctx.log("Summary: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    if not params.get("only"):
+        autocheck.record(series)
     return {"scan_id": scan_id, "plan_id": plan_id, "counts": counts}
 
 
@@ -940,6 +943,7 @@ def job_apply(ctx, params):
     if plan["status"] != "draft":
         raise RuntimeError("This plan was already applied. Rescan to make a new plan.")
     result = apply_plan(series, plan, ctx)
+    autocheck.record(series)
     if result.get("applied"):
         try:
             result["new_plan"] = _plan_after_apply(series, plan, ctx)
@@ -959,6 +963,7 @@ def job_undo(ctx, params):
     if ap["undone_at"]:
         raise RuntimeError("Already undone")
     result = undo_apply(series, ap, ctx)
+    autocheck.record(series)
     try:
         _plan_after_undo(series, ap, ctx)
     except Exception as e:  # noqa: BLE001

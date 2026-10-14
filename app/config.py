@@ -69,6 +69,8 @@ SCHEMA: dict[str, tuple[object, str, bool]] = {
     "specials_folder": ("Specials", "SPECIALS_FOLDER", False),
     "backup_folder": ("_episodeid_backup", "BACKUP_FOLDER", False),
     "allow_splits": (True, "ALLOW_SPLITS", False),
+    # Look for added / replaced / removed files and rescan when there are any (0 = off)
+    "auto_check_hours": (24, "AUTO_CHECK_HOURS", False),
     # Web UI login (HTTP Basic). Both set = login required; either empty = open.
     "auth_username": ("", "AUTH_USERNAME", False),
     "auth_password": ("", "AUTH_PASSWORD", True),

@@ -422,6 +422,10 @@ def _series_out(s: dict, full: bool = False) -> dict:
     # the plan is the verdict (title cards, overrides and applied changes included);
     # only shown when it was made from the latest scan or after it
     out["plan"] = plan if plan and (not scan or plan["created"] >= scan["created"]) else None
+    from .autocheck import load_state
+    ac = load_state(s["id"])
+    pend = {k: v for k, v in (ac.get("pending") or {}).items() if k != "files"} or None
+    out["file_check"] = {"checked_at": ac.get("checked_at"), "pending": pend}
     if full:
         misses = _load_misses(s["tvdb_id"])
         out["episodes"] = [{
@@ -578,6 +582,19 @@ def backup_delete(sid: int, body: BackupDeleteReq):
     log.info("series %s: deleted %s backed-up files (%s bytes) from %s", sid, r["deleted"], r["bytes"],
              body.buckets)
     return r
+
+
+@app.post("/api/file-check")
+def file_check_now():
+    """Check every series for added / replaced / removed files now (flags cards, fetches
+    references for new episodes; doesn't scan)."""
+    from . import autocheck
+    out = []
+    for sr in db.list_series():
+        d = autocheck.check(db.get_series(sr["id"]))
+        if d and any(d.values()):
+            out.append({"name": sr["name"], **{k: len(v) for k, v in d.items()}})
+    return {"changed": out}
 
 
 @app.get("/api/cache")

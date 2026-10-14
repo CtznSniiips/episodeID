@@ -156,6 +156,7 @@ async function renderHome() {
         <div class="small muted">References: ${s.reference_count} / ${s.episode_count} episodes</div>
         <div class="bar"><div style="width:${pct}%"></div></div>
         <div class="counts">${counts}</div>
+        ${fileCheckLine(s.file_check)}
         ${s.active_job ? `<div class="small"><span class="badge b-info">${esc(s.active_job.kind)} running…</span></div>` : ""}
       </div>`;
     }).join("") + `</div>`;
@@ -163,6 +164,21 @@ async function renderHome() {
   view.innerHTML = html;
   $("#add").onclick = () => addSeriesDialog();
   $$(".series-card").forEach((c) => c.onclick = () => location.hash = `#/series/${c.dataset.id}`);
+}
+
+function ago(iso) {
+  const h = (Date.now() - new Date(iso).getTime()) / 3600e3;
+  return h < 1 ? "under an hour ago" : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} days ago`;
+}
+
+function fileCheckLine(fc) {
+  if (!fc || !fc.checked_at) return "";
+  const p = fc.pending;
+  if (!p) return `<div class="small muted">Files checked ${ago(fc.checked_at)} · no changes since the last scan</div>`;
+  const what = [p.added && `${p.added} new`, p.changed && `${p.changed} replaced`, p.removed && `${p.removed} removed`]
+    .filter(Boolean).join(", ");
+  return `<div class="small" title="${esc((p.examples || []).join("\n"))}"><span class="badge b-info">⚑ ${what} since the last scan</span>
+    <span class="muted">— open the series and Scan files</span></div>`;
 }
 
 function seriesCardCounts(s) {
@@ -174,7 +190,8 @@ function seriesCardCounts(s) {
   const ok = k.ok || 0, review = k.review || 0;
   const changes = (k.rename || 0) + (k.split || 0) + (k.aside || 0);
   if (!changes && !review) {
-    return `<span class="badge b-ok" title="${esc(scanTip)}">✓ All ${ok} file${ok === 1 ? "" : "s"} correct</span>`;
+    const scanned = s.file_check && s.file_check.pending ? " scanned" : "";
+    return `<span class="badge b-ok" title="${esc(scanTip)}">✓ All ${ok}${scanned} file${ok === 1 ? "" : "s"} correct</span>`;
   }
   return [ok ? `<span class="badge b-ok" title="${esc(scanTip)}">${ok} correct</span>` : "",
     changes ? `<span class="badge b-warn">${changes} to change</span>` : "",
@@ -1111,6 +1128,10 @@ async function renderSettings() {
     ${f("specials_folder", "Specials folder")}
     ${f("backup_folder", "Backup folder", "Created next to your series folders (<TV>/_episodeid_backup/<Show>/…), out of Sonarr's sight. Displaced files go here — nothing is deleted.")}
     ${cb("allow_splits", "Allow splitting multi-episode files", "Lossless cuts at the black gap between episodes.")}</fieldset>
+  <fieldset><legend>File check</legend>
+    ${f("auto_check_hours", "Check for new files every (hours)", "Looks for added, replaced or removed video files in every scanned series (names, sizes and dates only — no video is read). A series with changes is flagged on its card and gets references fetched for new episodes; scanning is left to you. 0 turns it off.", "number")}
+    <div class="row" style="justify-content:flex-end"><span class="small muted" id="fc-out"></span>
+      <button class="btn small" type="button" id="fc-now">Check now</button></div></fieldset>
   <fieldset><legend>Security</legend>
     <p class="muted small" style="margin-top:0">Set both to ask for a login before the web UI opens (your browser asks once and
       remembers it). Leave either blank for no login. Locked out? Set AUTH_USERNAME / AUTH_PASSWORD on the container,
@@ -1153,6 +1174,16 @@ async function renderSettings() {
     $("#cache-info").innerHTML = c.kinds.map((k) => `${esc(k.label)}: ${k.files} files, ${fmtBytes(k.bytes)}`).join("<br>");
   };
   api("/api/cache").then(showCache).catch(() => { $("#cache-info").textContent = ""; });
+  $("#fc-now").onclick = async () => {
+    const out = $("#fc-out");
+    out.textContent = "Checking…";
+    try {
+      const r = await api("/api/file-check", { method: "POST" });
+      out.textContent = r.changed.length ? "Changed since the last scan: " + r.changed.map((c) =>
+        `${c.name} (${[c.added && c.added + " new", c.changed && c.changed + " replaced", c.removed && c.removed + " removed"].filter(Boolean).join(", ")})`).join("; ")
+        : "No changes.";
+    } catch (err) { out.textContent = err.message; }
+  };
   $("#cache-prune").onclick = async () => {
     const out = $("#cache-out");
     out.textContent = "Checking every series…";

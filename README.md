@@ -103,6 +103,7 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 | `COLON_REPLACEMENT` | `smart` | As Sonarr: `smart` ("Up: Pups" → "Up - Pups"), `delete`, `dash`, `space_dash`, `space_dash_space`, `custom` (+ `COLON_REPLACEMENT_CUSTOM`) |
 | `MULTI_EPISODE_STYLE` | `prefixed_range` | As Sonarr: `prefixed_range` S01E01-E03 (default), `extend` S01E01-02-03, `duplicate` S01E01 - S01E02 - S01E03, `repeat` S01E01E02E03, `scene` S01E01-E02-E03, `range` S01E01-03 |
 | `AUTH_USERNAME`, `AUTH_PASSWORD` | | Both set: the web UI asks for a login |
+| `AUTO_CHECK_HOURS` | `24` | How often to look for added, replaced or removed video files in scanned series (names, sizes, dates — no video is read). A series with changes is flagged on its card ("⚑ 2 new since the last scan") and gets references fetched for new episodes; it isn't scanned — that's left to you. The flag clears when the series is scanned. `0` = off. *Settings → File check → Check now* runs it at once. |
 | `MIN_SCORE`, `MIN_MARGIN`, `MIN_SEGMENT_SECONDS` | `0.12`, `0.04`, `240` | Matching thresholds |
 
 `{series}` defaults to the series folder name; change it per series under *Series options*.
