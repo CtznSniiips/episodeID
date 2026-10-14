@@ -201,8 +201,7 @@ def job_scan(ctx, params):
             if c in eps and (include_specials or eps[c]["season"] > 0)}
     ctx.log(f"References available for {len(refs)} of "
             f"{sum(1 for e in eps.values() if include_specials or e['season'] > 0)} episodes.")
-    matcher = Matcher(refs, s) if refs else None
-    if matcher is None:
+    if not refs:
         ctx.log("No references yet — every file will need the AI fallback or a manual decision.")
 
     try:
@@ -214,19 +213,31 @@ def job_scan(ctx, params):
         only = set(params["only"])
         videos = [v for v in videos if str(v.relative_to(root)) in only]
     ctx.log(f"Scanning {len(videos)} video files in {root}")
-    files = []
+    # 1. Read every file's dialogue (cached unless new or replaced).
+    read = []
     for i, v in enumerate(videos):
         ctx.check_cancel()
         rel = str(v.relative_to(root))
-        ctx.progress(i / max(1, len(videos)), f"Scanning {v.name}")
-        expected = parse_filename_episodes(v.name)
+        ctx.progress(i / max(1, len(videos)) * 0.9, f"Reading {v.name}")
         try:
-            dlg = get_dialogue(v, ctx, allow_whisper=params.get("whisper", True))
+            read.append((v, rel, get_dialogue(v, ctx, allow_whisper=params.get("whisper", True)), None))
         except Exception as e:  # noqa: BLE001
-            ctx.log(f"{rel}: could not read ({e})")
+            read.append((v, rel, None, e))
+    # 2. Match. Word weights come from the references and every file's dialogue.
+    background = [" ".join(c[2] for c in dlg["cues"]) for _v, _r, dlg, _e in read if dlg and dlg["cues"]]
+    matcher = Matcher(refs, s, background) if refs else None
+    if matcher and len(refs) < 5:
+        ctx.log(f"Only {len(refs)} reference(s): a dialogue match only counts when it's plainly that episode.")
+    files = []
+    for i, (v, rel, dlg, err) in enumerate(read):
+        ctx.check_cancel()
+        ctx.progress(0.9 + 0.1 * i / max(1, len(read)), f"Matching {v.name}")
+        expected = parse_filename_episodes(v.name)
+        if err is not None:
+            ctx.log(f"{rel}: could not read ({err})")
             files.append({"rel": rel, "size": v.stat().st_size, "duration": 0,
                           "text_source": "none", "expected": expected, "segments": [],
-                          "whole": [], "status": "ERROR", "note": str(e)[:200]})
+                          "whole": [], "status": "ERROR", "note": str(err)[:200]})
             continue
         res = matcher.match_file(dlg["cues"], dlg["duration"]) if matcher and dlg["cues"] \
             else {"segments": [], "whole": []}

@@ -39,18 +39,27 @@ def parse_filename_episodes(name: str) -> list[str]:
     return []
 
 
+FEW_REFS = 5          # below this many references a match needs to be plainly that episode
+PLAINLY_SAME = 0.35   # (= references.SAME_EPISODE_SCORE) similarity of the same episode
+
+
 class Matcher:
-    def __init__(self, refs: dict[str, str], settings: dict):
+    def __init__(self, refs: dict[str, str], settings: dict, background: list[str] | None = None):
+        """background: the series' own files' dialogue. Word weights are learned from it as
+        well as from the references, so what every episode says (the characters' names,
+        catchphrases, the theme song) counts for little. With only a few references that
+        is what tells one episode from another; the references alone can't."""
         if not refs:
             raise ValueError("No reference texts available — fetch references first.")
         self.codes = sorted(refs)
         self.s = settings
-        n = len(self.codes)
+        docs = [refs[c] for c in self.codes] + [t for t in background or [] if t.strip()]
         self.vec = TfidfVectorizer(
             lowercase=True, strip_accents="unicode", sublinear_tf=True,
-            ngram_range=(1, 2), min_df=1, max_df=0.6 if n >= 10 else 1.0,
+            ngram_range=(1, 2), min_df=1, max_df=0.6 if len(docs) >= 10 else 1.0,
             token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z']+\b", stop_words="english")
-        self.R = self.vec.fit_transform([refs[c] for c in self.codes])  # l2-normalised
+        self.vec.fit(docs)
+        self.R = self.vec.transform([refs[c] for c in self.codes])  # l2-normalised
 
     def score_text(self, text: str) -> np.ndarray:
         return (self.vec.transform([text]) @ self.R.T).toarray()[0]
@@ -108,6 +117,9 @@ class Matcher:
             if margin < self.s["min_margin"] or best["score"] < 1.4 * max(second["score"], 1e-6):
                 why.append(f"close to {second['code']} ({best['score']:.2f} vs "
                            f"{second['score']:.2f})")
+            if len(self.codes) < FEW_REFS and best["score"] < PLAINLY_SAME:
+                why.append(f"only {len(self.codes)} reference{'s' if len(self.codes) > 1 else ''} to compare "
+                           f"with — {best['score']:.2f} isn't enough to say it's that episode")
             high = not why
             segments.append({
                 "start": round(r["start"], 1), "end": round(r["end"], 1),
