@@ -27,35 +27,16 @@ Works out which episode each video file **really** contains by reading its dialo
 
 ### Title cards
 
-For shows that put the episode title on screen, EpisodeID can read it with OCR
-(RapidOCR, bundled models, CPU) and use it as evidence that doesn't depend on
-subtitles, references or anyone's episode numbering:
+For shows that put the episode title on screen, EpisodeID can read it with OCR (RapidOCR, bundled models, CPU) and use it as evidence that doesn't depend on subtitles, references or anyone's episode numbering:
 
-- **Auto** (default per series): the first scan tests up to 6 files. Title cards are
-  used only if they're found on most of them, and their usual position is learned so
-  later files are checked quickly. Change it under *Series options*: Auto / On / Off,
-  and whether to check every file or only those the dialogue match didn't confirm.
-- Title card agrees with the dialogue → confirmed. Title card **and** filename agree but
-  the dialogue doesn't → the file is left alone and the log names the reference to check.
-  Weak dialogue → the title card decides, even against the filename, when it's a clear read
-  (complete title, 2+ frames; *Series options → Trust title cards*, on by default). Strong
-  dialogue disagreeing with the card → review. Two files whose cards name each other's
-  episode are a confirmed swap.
-- Files with no subtitles and no transcript can be identified from their cards alone,
-  including two-episode files with two cards.
-- Optional: send hard-to-read cards to a vision-capable model on the AI endpoint
-  (*Settings → Title cards*).
-- **Speed / hardware acceleration.** Keyframes are read first (about 8x less decoding;
-  title cards nearly always start on a cut), and a window is only fully decoded when
-  that finds nothing. OCR runs on the GPU in the `-cuda` image (ONNX Runtime CUDA), and
-  video decoding uses NVDEC there, or VAAPI on Intel/AMD integrated graphics when
-  `/dev/dri` is passed to the container. Everything falls back to the CPU on its own;
-  *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
+- **Auto** (default per series): the first scan tests up to 6 files. Title cards are used only if they're found on most of them, and their usual position is learned so later files are checked quickly. Change it under *Series options*: Auto / On / Off, and whether to check every file or only those the dialogue match didn't confirm.
+- Title card agrees with the dialogue → confirmed. Title card **and** filename agree but the dialogue doesn't → the file is left alone and the log names the reference to check. Weak dialogue → the title card decides, even against the filename, when it's a clear read (complete title, 2+ frames; *Series options → Trust title cards*, on by default). Strong dialogue disagreeing with the card → review. Two files whose cards name each other's  episode are a confirmed swap.
+- Files with no subtitles and no transcript can be identified from their cards alone, including two-episode files with two cards.
+- Optional: send hard-to-read cards to a vision-capable model on the AI endpoint (*Settings → Title cards*).
+- **Speed / hardware acceleration.** Keyframes are read first (about 8x less decoding; title cards nearly always start on a cut), and a window is only fully decoded when that finds nothing. OCR runs on the GPU in the `-cuda` image (ONNX Runtime CUDA), and video decoding uses NVDEC there, or VAAPI on Intel/AMD integrated graphics when `/dev/dri` is passed to the container. Everything falls back to the CPU on its own; *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
 - Text from the opening titles that looks like an episode title is spotted on each scan from a sample of files spread across the library: the same title read at the same point in several files whose names say otherwise is ignored at that point, and still counts as a title card anywhere else.
 - A read that contradicts the filename (an intro roll call of names, a sign) doesn't end the search for the card: the scan keeps going, and a card that fits the filename wins over other text read within 2 minutes of it. A file whose card really contradicts its name is still caught.
-- Only large on-screen text counts, and it must match one title clearly better than any
-  other, so signs and credits in the background are ignored. OCR results are cached; to read
-  the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
+- Only large on-screen text counts, and it must match one title clearly better than any other, so signs and credits in the background are ignored. OCR results are cached; to read the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
 
 ### Safety
 - Nothing is deleted unless you ask: *Series options → Backup folder* shows what's there (count and size per folder) and deletes the folders you tick, after typing DELETE. Displaced files go to `_episodeid_backup/<Show>/` **beside** the series folder (in the same TV folder — not inside the series, so Sonarr doesn't pick them up; a backup folder left inside a series by an older version is moved there automatically, and Undo keeps working): `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`. The top of the backup folder gets ignore files so media servers that scan the TV folder skip it: `.ignore` (Jellyfin; Emby 4.8), `.embyignore` (Emby 4.9+), `.plexignore` (Plex) and `.nomedia` (Kodi). Ones already there are left as they are.
