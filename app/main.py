@@ -788,10 +788,14 @@ def set_override(sid: int, body: Override):
     opts = dict(s["options"] or {})
     ov = dict(opts.get("overrides") or {})
     if body.codes:
-        codes = [c.strip().upper() for c in body.codes if c.strip()]
-        for c in codes:
-            if not re.fullmatch(r"S\d{2,3}E\d{2,4}", c):
-                raise HTTPException(400, f"'{c}' is not an episode code like S01E02")
+        from .matcher import parse_filename_episodes
+        codes = []
+        for tok in (c.strip() for c in body.codes if c.strip()):
+            # "S02E46E47", "S02E46-E47", "S02E46-47", "s2e5", "2x05" → one code per episode
+            got = parse_filename_episodes(tok) if re.fullmatch(r"(?i)s?\d+[ex][\dex\- ]+", tok) else []
+            if not got:
+                raise HTTPException(400, f"'{tok}' is not an episode code like S01E02 or S01E02E03")
+            codes += [c for c in got if c not in codes]
         ov[body.source] = codes
     else:
         ov.pop(body.source, None)

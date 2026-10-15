@@ -816,7 +816,7 @@ function setEpisodeDialog(source, current) {
   const box = modal(`<h2 style="margin-top:0">Set episode</h2>
     <div class="path">${esc(source)}</div>
     <p class="muted small">Type the episode code(s) this file really contains, in the order they play —
-      e.g. <span class="mono">S02E05</span> or <span class="mono">S02E05 S02E06</span> for a two-part file.
+      e.g. <span class="mono">S02E05</span>, or <span class="mono">S02E05E06</span> / <span class="mono">S02E05 S02E06</span> for a two-part file.
       If the scan found the same number of segments, each segment gets one code (splitting if needed).</p>
     <input type="text" id="codes" value="${esc(current)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">
     <div class="row" style="margin-top:12px"><div class="spacer"></div>

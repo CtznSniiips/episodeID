@@ -43,6 +43,9 @@ MIN_CONF = 0.75         # OCR confidence for a line to be considered
 # from other settings that found no complete title are read again.
 OCR_SIG = f"rapidocr-1|{FRAME_W}x{FRAME_H}|det-min-{FRAME_H}"
 RECUR_TOL = 8           # seconds either side of where recurring intro text appears
+ZOOM_MIN_H = 0.09       # a line this tall that matched nothing gets a closer look…
+ZOOM_FPS = 4.0          # …at this many frames a second, around it
+ZOOM_MAX = 3            # (at most this many places per window)
 CARD_SETTLE = 6         # keep reading this many seconds after a card first appears…
 CARD_SETTLE_PARTIAL = 12  # …or this long if only part of a title has been read so far
 
@@ -554,14 +557,60 @@ def _reuse_cached(data: dict, index: TitleIndex, fps: float,
     return frames if stopped > first + _settle(full_seen) else None
 
 
+def _zoom(video: Path, frames: list[dict], index: TitleIndex, ctx, ep_start: float,
+          expected=None) -> list[dict]:
+    """Big text that matched no title — usually a card animating in, read at an
+    awkward moment ("You Crocl" for "You Crack Me Up"). One frame a second can land on
+    nothing but such moments, so look again around it at ZOOM_FPS. Returns the new
+    frames (not yet in `frames`)."""
+    def big(fr):
+        return any(l[2] >= ZOOM_MIN_H and l[1] >= 0.6 and re.search(r"[^\W\d_]{3,}", l[0]) for l in fr["lines"])
+    if any(fr.get("hit") and not fr["hit"]["partial"] and _fits(fr["hit"], expected) for fr in frames):
+        return []  # this window already has the card the filename expects
+    full_at = [fr["t"] for fr in frames if fr.get("hit") and not fr["hit"]["partial"]]
+    spots = [fr for fr in frames if (not fr.get("hit") or fr["hit"]["partial"]) and big(fr)
+             and not any(abs(fr["t"] - t) <= 3 for t in full_at)]
+    # Runs of such frames (the text stays up while it animates): look across each run.
+    runs: list[list[float]] = []
+    for fr in sorted(spots, key=lambda fr: fr["t"]):
+        if runs and fr["t"] - runs[-1][1] <= 2.5:
+            runs[-1][1] = fr["t"]
+        else:
+            runs.append([fr["t"], fr["t"]])
+    runs = sorted(runs, key=lambda r: r[0] - r[1])[:ZOOM_MAX]  # the longest first
+    have = [fr["t"] for fr in frames]
+    new = []
+    for a, b in sorted(runs):
+        if ctx:
+            ctx.check_cancel()
+        a = max(0.0, a - 1.0)
+        for t, img in _sample(video, a, min(b + 1.5, a + 10.0) - a, ZOOM_FPS, "full"):
+            t = round(t, 2)
+            if any(abs(t - h) < 0.12 for h in have):
+                continue
+            lines = _ocr_frame(img)
+            new.append({"t": t, "lines": lines, "hit": index.match_frame(lines, t - ep_start), "zoom": True})
+            have.append(t)
+    return new
+
+
 def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
                ctx, stop_on_hit: bool, mode: str, force: float = 0,
                ep_start: float = 0.0, expected=None) -> list[dict]:
     fps = float(get_settings()["titlecard_fps"])
     cache = _cache_path(video, start, length, fps, mode)
     if cache.exists() and not (force and cache.stat().st_mtime < force):
-        frames = _reuse_cached(json.loads(cache.read_text()), index, fps, ep_start, expected)
+        data = json.loads(cache.read_text())
+        frames = _reuse_cached(data, index, fps, ep_start, expected)
         if frames is not None:
+            if mode == "full" and not data.get("zoomed"):
+                # read before the closer look existed: take it now, once
+                new = _zoom(video, frames, index, ctx, ep_start, expected)
+                data["frames"] = sorted(data["frames"] + [{"t": f["t"], "lines": f["lines"]} for f in new],
+                                        key=lambda f: f["t"])
+                data["zoomed"] = True
+                cache.write_text(json.dumps(data))
+                frames = sorted(frames + new, key=lambda f: f["t"])
             return frames
 
     import cv2
@@ -589,8 +638,11 @@ def _scan_pass(video: Path, start: float, length: float, index: TitleIndex,
         if _fits(hit, expected):
             first_hit_t = t if first_hit_t is None else first_hit_t
             full_seen = full_seen or not hit["partial"]
+    if mode == "full":
+        frames = sorted(frames + _zoom(video, frames, index, ctx, ep_start, expected), key=lambda f: f["t"])
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({"complete": complete, "stopped_at": stopped_at, "ocr": OCR_SIG,
+                                 "zoomed": mode == "full",
                                  "frames": [{"t": f["t"], "lines": f["lines"]} for f in frames]}))
     return frames
 
