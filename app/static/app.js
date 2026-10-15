@@ -33,13 +33,21 @@ function toast(msg, ms = 3500) {
 }
 const fail = (e) => toast("⚠ " + e.message, 6000);
 
-function modal(html) {
+// sticky: a click outside the dialog doesn't close it (dialogs you type into and read from).
+function modal(html, { sticky = false } = {}) {
   $("#modal-box").innerHTML = html;
   $("#modal").classList.remove("hidden");
+  $("#modal").dataset.sticky = sticky ? "1" : "";
   return $("#modal-box");
 }
 function closeModal() { $("#modal").classList.add("hidden"); $("#modal-box").innerHTML = ""; $("#modal-box").style.width = ""; }
-$("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
+// Close on a click outside the dialog — only when the press started outside it too, so
+// selecting text in a box and letting go past the edge doesn't close it.
+let modalDownOutside = false;
+$("#modal").addEventListener("mousedown", (e) => { modalDownOutside = e.target.id === "modal"; });
+$("#modal").addEventListener("click", (e) => {
+  if (e.target.id === "modal" && modalDownOutside && !$("#modal").dataset.sticky) closeModal();
+});
 
 const fmtTime = (s) => {
   s = Math.max(0, Math.round(s || 0));
@@ -734,29 +742,46 @@ function cutDialog(plan, it) {
   }).catch((e) => { $("#cuts-body", box).innerHTML = `<span class="badge b-bad">Failed</span> ${esc(e.message)}`; });
 }
 
+// "m:ss" or "h:mm:ss"; a number on its own is minutes ("12" → 12:00, "1.5" → 1:30).
 function parseTime(v) {
-  const p = String(v).trim().split(":").map(Number);
+  const t = String(v).trim();
+  if (t === "") return NaN;
+  if (!t.includes(":")) { const m = Number(t); return isNaN(m) ? NaN : Math.round(m * 60); }
+  const p = t.split(":").map(Number);
   if (p.some(isNaN)) return NaN;
   return p.reduce((a, x) => a * 60 + x, 0);
 }
 
 function cardCheckDialog(source) {
-  const box = modal(`<h2 style="margin-top:0">Check title cards</h2>
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Check title cards</h2>
+      <div class="spacer"></div><button class="btn small" id="cc-x" title="Close" aria-label="Close">✕</button></div>
     <div class="path">${esc(source)}</div>
     <p class="muted small">Reads every sampled frame in the range (up to 3 minutes) and shows the OCR text and
       what it matched — nothing is cached or skipped. Try both decoders if a card is being missed.</p>
     <div class="row">
-      <label class="small">From <input id="cc-a" value="0:00" size="6"></label>
-      <label class="small">to <input id="cc-b" value="1:30" size="6"></label>
+      <label class="small" title="m:ss — or just minutes: 12 = 12:00">From <input id="cc-a" value="0:00" size="6"></label>
+      <label class="small" title="Set to From + 1:30 whenever From changes">to <input id="cc-b" value="1:30" size="6"></label>
       <label class="small">Decode <select id="cc-d"><option value="auto">as the scan does</option><option value="cpu">CPU</option></select></label>
       <label class="small">Frames <select id="cc-m"><option value="full">all (1 per second)</option><option value="key">keyframes only</option></select></label>
       <div class="spacer"></div><button class="btn primary" id="cc-go">Read</button></div>
     <div id="cc-out" style="margin-top:12px"></div>
     <div class="row" style="margin-top:12px"><button class="btn" id="cc-copy" disabled>Copy as text</button>
-      <div class="spacer"></div><button class="btn" id="c">Close</button></div>`);
+      <div class="spacer"></div><button class="btn" id="c">Close</button></div>`, { sticky: true });
   $("#modal-box").style.width = "min(960px, 100%)";
   let text = "";
   $("#c", box).onclick = closeModal;
+  $("#cc-x", box).onclick = closeModal;
+  // From: tidy what was typed ("12" → "12:00") and put To 90 s after it.
+  const from = $("#cc-a", box), to = $("#cc-b", box);
+  let lastFrom = from.value;
+  from.addEventListener("change", () => {
+    const t = parseTime(from.value);
+    if (isNaN(t)) return;
+    from.value = fmtTime(t);
+    if (from.value !== lastFrom) to.value = fmtTime(t + 90);
+    lastFrom = from.value;
+  });
+  to.addEventListener("change", () => { const t = parseTime(to.value); if (!isNaN(t)) to.value = fmtTime(t); });
   $("#cc-copy", box).onclick = async () => {
     try { await navigator.clipboard.writeText(text); toast("Copied"); }
     catch { const t = document.createElement("textarea"); t.value = text; document.body.append(t); t.select(); document.execCommand("copy"); t.remove(); toast("Copied"); }
