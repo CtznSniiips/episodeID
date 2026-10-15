@@ -373,11 +373,48 @@ class TitleIndex:
                     if len(dedup) < len(words):
                         cands.append(" ".join(dedup))
         reads = [r for r in (self.not_recurring(self.read(c), at) for c in dict.fromkeys(cands)) if r]
+        if not any(not r["partial"] for r in reads) and len(big) >= 2:
+            g = self.not_recurring(self._gapped(big), at)
+            if g:
+                reads.append(g)
         if not reads:
             return None
         # Prefer complete reads, then the most specific (longest) text.
         reads.sort(key=lambda r: (not r["partial"], len(_ns(r["text"])), r["score"]), reverse=True)
         return reads[0]
+
+
+    def _gapped(self, big: list[list]) -> dict | None:
+        """A title read in two pieces with its middle hidden — artwork over the letters
+        ("BUILDSABUTT" + "RDEN" for "Builds a Butterfly Garden", a butterfly covering
+        "ERFLY GA"). The tall piece must appear in the title, the other piece must be how
+        the title ends, after it, and together they must cover a good part of what's
+        left of the title. Counts only when exactly one episode fits."""
+        heads = [l for l in big if l[2] >= MIN_TITLE_FRAC and len(_ns(l[0])) >= 6]
+        fits: dict[str, tuple] = {}
+        for h in heads:
+            a = _ns(h[0])
+            for t in big:
+                if t is h:
+                    continue
+                b = _ns(t[0])
+                if len(b) < 3:
+                    continue
+                for ti in self.titles:
+                    ns = ti["ns"]
+                    p = ns.find(a)
+                    if p < 0 or not ns.endswith(b) or len(ns) - len(b) < p + len(a):
+                        continue
+                    cov = (len(a) + len(b)) / (len(ns) - p)
+                    if ti["code"] not in fits or fits[ti["code"]][0] < cov:
+                        fits[ti["code"]] = (cov, ti, f"{h[0]} … {t[0]}")
+        if len(fits) != 1:
+            return None  # the pieces fit several titles ("BUILDS A" … "DEN": any garden)
+        cov, ti, text = next(iter(fits.values()))
+        if cov < 0.5:
+            return None  # most of it unread
+        return {"code": ti["code"], "title": ti["title"], "text": text, "score": round(cov, 3),
+                "partial": False, "gapped": True}
 
 
 # --------------------------------------------------------------- sampling
