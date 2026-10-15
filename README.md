@@ -14,12 +14,8 @@ Works out which episode each video file **really** contains by reading its dialo
 1. **Episode list** comes from TVDB (default/aired order, the same order Sonarr uses). It's refreshed before a scan or reference fetch when it's more than 12 hours old, so renumbering on TVDB (episodes moved into a new season, say) is picked up; references and episodes you set by hand move to the new numbers with them. A filename naming an episode the list doesn't have is never renamed.
 2. **References** are what each episode is supposed to say, fetched once and cached:
    - files you upload yourself (*Episodes & references* tab), highest priority
-   - a Fandom wiki transcript page (no quota cost). The wiki is found automatically from
-     the series name, its transcript pages are listed from the wiki itself and matched to
-     TVDB episodes by title (so "The Re-Run" finds "The Rerun/Transcript"). You can still
-     set or override it under *Series options*.
-   - OpenSubtitles, searched by season/episode (series IMDb ID) and by the episode's IMDb ID, checking the title. When neither finds it — older shows are often numbered differently on IMDb — or what's found is titled as another episode, it searches by episode title within the series. It also stands in when the wiki doesn't answer (after 3 failures in a row the wiki is left alone for that fetch); a later fetch replaces those with wiki transcripts. Wikis are asked politely — EpisodeID identifies itself, keeps to about one request a second per wiki, uses the MediaWiki API, and backs off as long as asked when a wiki answers 403/429 — since Fandom blocks scripts that hammer it.
-     A subtitle's own file name (usually the uploader's video file, e.g. `Paw.Patrol.S06E31.Pups.Save.the.Bears.1080p`) is checked too: this episode's TVDB title there verifies the subtitle, another episode's title rules it out. Already-downloaded references that aren't trusted yet are re-checked this way on the next *Fetch references* (a search only — no download quota).
+   - a Fandom wiki transcript page (no quota cost). The wiki is found automatically from the series name, its transcript pages are listed from the wiki itself and matched to TVDB episodes by title (so "The Re-Run" finds "The Rerun/Transcript"). You can still set or override it under *Series options*.
+   - OpenSubtitles, searched by season/episode (series IMDb ID) and by the episode's IMDb ID, checking the title. When neither finds it — older shows are often numbered differently on IMDb — or what's found is titled as another episode, it searches by episode title within the series. It also stands in when the wiki doesn't answer (after 3 failures in a row the wiki is left alone for that fetch); a later fetch replaces those with wiki transcripts. Wikis are asked politely — EpisodeID identifies itself, keeps to about one request a second per wiki, uses the MediaWiki API, and backs off as long as asked when a wiki answers 403/429 — since Fandom blocks scripts that hammer it. A subtitle's own file name (usually matching the uploader's video file) is checked too: this episode's TVDB title there verifies the subtitle, another episode's title rules it out. Already-downloaded references that aren't trusted yet are re-checked this way on the next *Fetch references* (a search only — no download quota).
 3. **Your files' dialogue** comes from a sidecar `.srt/.ass/.vtt`, else an embedded text subtitle track, else **Whisper** (faster-whisper; also covers image-based PGS/VobSub subs). Results are cached, and survive renames.
 4. **Matching**: the dialogue is cut into 90 s windows (every 45 s), each scored against every reference with TF-IDF cosine similarity. A Viterbi pass picks one episode per window with a switching penalty, giving clean segments, so two-episode files and swapped halves are detected. Each segment is re-scored as a whole for its confidence.
 5. **AI fallback (optional)**: any OpenAI-compatible endpoint (Ollama `/v1`, OpenAI, LM Studio, vLLM, OpenRouter…). Only consulted for files the matcher couldn't settle, choosing among ≤12 unclaimed candidates using TVDB summaries. Its picks are marked **AI** and are never ticked for apply automatically.
@@ -27,35 +23,16 @@ Works out which episode each video file **really** contains by reading its dialo
 
 ### Title cards
 
-For shows that put the episode title on screen, EpisodeID can read it with OCR
-(RapidOCR, bundled models, CPU) and use it as evidence that doesn't depend on
-subtitles, references or anyone's episode numbering:
+For shows that put the episode title on screen, EpisodeID can read it with OCR (RapidOCR, bundled models, CPU) and use it as evidence that doesn't depend on subtitles, references or anyone's episode numbering:
 
-- **Auto** (default per series): the first scan tests up to 6 files. Title cards are
-  used only if they're found on most of them, and their usual position is learned so
-  later files are checked quickly. Change it under *Series options*: Auto / On / Off,
-  and whether to check every file or only those the dialogue match didn't confirm.
-- Title card agrees with the dialogue → confirmed. Title card **and** filename agree but
-  the dialogue doesn't → the file is left alone and the log names the reference to check.
-  Weak dialogue → the title card decides, even against the filename, when it's a clear read
-  (complete title, 2+ frames; *Series options → Trust title cards*, on by default). Strong
-  dialogue disagreeing with the card → review. Two files whose cards name each other's
-  episode are a confirmed swap.
-- Files with no subtitles and no transcript can be identified from their cards alone,
-  including two-episode files with two cards.
-- Optional: send hard-to-read cards to a vision-capable model on the AI endpoint
-  (*Settings → Title cards*).
-- **Speed / hardware acceleration.** Keyframes are read first (about 8x less decoding;
-  title cards nearly always start on a cut), and a window is only fully decoded when
-  that finds nothing. OCR runs on the GPU in the `-cuda` image (ONNX Runtime CUDA), and
-  video decoding uses NVDEC there, or VAAPI on Intel/AMD integrated graphics when
-  `/dev/dri` is passed to the container. Everything falls back to the CPU on its own;
-  *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
-- Text from the opening titles that looks like an episode title (Bluey's intro names "BINGO" about 20 s into every episode) is spotted on each scan from a sample of files spread across the library: the same title read at the same point in several files whose names say otherwise is ignored at that point, and still counts as a title card anywhere else.
+- **Auto** (default per series): the first scan tests up to 6 files. Title cards are used only if they're found on most of them, and their usual position is learned so later files are checked quickly. Change it under *Series options*: Auto / On / Off, and whether to check every file or only those the dialogue match didn't confirm.
+- Title card agrees with the dialogue → confirmed. Title card **and** filename agree but the dialogue doesn't → the file is left alone and the log names the reference to check. Weak dialogue → the title card decides, even against the filename, when it's a clear read (complete title, 2+ frames; *Series options → Trust title cards*, on by default). Strong dialogue disagreeing with the card → review. Two files whose cards name each other's episode are a confirmed swap.
+- Files with no subtitles and no transcript can be identified from their cards alone, including two-episode files with two cards.
+- Optional: send hard-to-read cards to a vision-capable model on the AI endpoint (*Settings → Title cards*).
+- **Speed / hardware acceleration.** Keyframes are read first (about 8x less decoding; title cards nearly always start on a cut), and a window is only fully decoded when that finds nothing. OCR runs on the GPU in the `-cuda` image (ONNX Runtime CUDA), and video decoding uses NVDEC there, or VAAPI on Intel/AMD integrated graphics when `/dev/dri` is passed to the container. Everything falls back to the CPU on its own; *Settings → Title cards → Test* shows what's in use and how fast OCR runs.
+- Text from the opening titles that looks like an episode title is spotted on each scan from a sample of files spread across the library: the same title read at the same point in several files whose names say otherwise is ignored at that point, and still counts as a title card anywhere else.
 - A read that contradicts the filename (an intro roll call of names, a sign) doesn't end the search for the card: the scan keeps going, and a card that fits the filename wins over other text read within 2 minutes of it. A file whose card really contradicts its name is still caught.
-- Only large on-screen text counts, and it must match one title clearly better than any
-  other, so signs and credits in the background are ignored. OCR results are cached; to read
-  the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
+- Only large on-screen text counts, and it must match one title clearly better than any other, so signs and credits in the background are ignored. OCR results are cached; to read the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
 
 ### Safety
 - Nothing is deleted unless you ask: *Series options → Backup folder* shows what's there (count and size per folder) and deletes the folders you tick, after typing DELETE. Displaced files go to `_episodeid_backup/<Show>/` **beside** the series folder (in the same TV folder — not inside the series, so Sonarr doesn't pick them up; a backup folder left inside a series by an older version is moved there automatically, and Undo keeps working): `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`. The top of the backup folder gets ignore files so media servers that scan the TV folder skip it: `.ignore` (Jellyfin; Emby 4.8), `.embyignore` (Emby 4.9+), `.plexignore` (Plex) and `.nomedia` (Kodi). Ones already there are left as they are.
