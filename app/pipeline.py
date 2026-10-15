@@ -597,6 +597,20 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")), recurring)
     runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
     runtime = runtimes[len(runtimes) // 2] if runtimes else None
+    # How long one episode runs in these files, from the files named as two or more
+    # episodes. TVDB's runtime can be missing, or count a 23-minute pair as one
+    # "episode" length; then a single-named file holding two episodes (Rubble & Crew
+    # "S02E02" with a second title card at 11:42) never gets its middle searched.
+    per_ep = sorted(float(f["duration"]) / len(f["expected"]) for f in files
+                    if len(f.get("expected") or []) >= 2 and float(f.get("duration") or 0) > 0)
+    if len(per_ep) >= 2:
+        own = per_ep[len(per_ep) // 2] / 60
+        if runtime is None or own < runtime * 0.75:
+            ctx.log(f"Title cards: an episode runs about {own:.1f} min in this series' files (from "
+                    f"{len(per_ep)} multi-episode files"
+                    + (f"; TVDB says {runtime:.0f}" if runtime else "") + ") — single-named files about "
+                    f"twice that long are searched for a second title card too.")
+            runtime = own
     rt = {c: e["runtime"] for c, e in eps.items() if e.get("runtime")}
     status = dict(opts.get("title_cards_status") or {})
     if not isinstance(status.get("recurring", {}), dict):

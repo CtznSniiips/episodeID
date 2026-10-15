@@ -148,3 +148,13 @@ pipeline._apply_title_cards(f, [{"code": "S09E07", "title": "x", "text": "SAVING
 print("S09E06E07 (one card, no dialogue):", f["status"], [(s["code"], s["start"], s["end"]) for s in f["segments"]])
 assert f["segments"][0]["start"] > 600 and f["status"] == "LOW_CONFIDENCE", f
 print("PASS (later card without dialogue)")
+
+# Rubble & Crew "S02E02" (23:16, named as one episode, really two): TVDB's runtime is
+# missing or a full 22 min, so the middle wasn't searched; with the length learned from
+# the series' multi-episode files (≈11.6 min each) it is, and 11:42 falls in the window.
+st = titlecard.episode_starts(1396, [seg(0, 1396, "S02E03")], 22, 1)
+assert not any(500 < x < 800 for x in st), st
+st = titlecard.episode_starts(1396, [seg(0, 1396, "S02E03")], 11.6, 1)
+print("scan starts, 11.6-min episodes:", st)
+assert any(x <= 702 <= x + 180 for x in st), st
+print("PASS (single-named double file)")
