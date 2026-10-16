@@ -340,6 +340,105 @@ def _segment_choice(seg: dict) -> tuple[str | None, str, bool]:
     return seg.get("code"), "low", False
 
 
+ACTIONABLE = ("rename", "split", "aside", "join")
+
+# "… - Part 2", "…, Part II", "… Pt. 3", "… (Part 1)" — the last one in the name.
+_PART = re.compile(r"(?i)(?:\s*[-–,]\s*|\s+|\s*\(\s*)(?:part|pt\.?)\s*(\d{1,2}|[ivx]{1,4}|one|two|three|four|five|six)\b\s*\)?")
+_PART_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10}
+_CODES = re.compile(r"(?i)\bs\d{1,2}e\d{1,3}(?:[-e]+\d{1,3})*\b|\b\d{1,2}x\d{2,3}\b")
+
+
+def part_of(rel: str) -> tuple[str, int] | None:
+    """("same name without the part marker or episode numbers", part number) for a file
+    named as one part of an episode, else None."""
+    p = Path(rel)
+    m = None
+    for m in _PART.finditer(p.stem):
+        pass
+    if not m:
+        return None
+    raw = m.group(1).lower()
+    n = int(raw) if raw.isdigit() else _PART_WORDS.get(raw) or _ROMAN.get(raw)
+    if not n:
+        return None
+    rest = p.stem[:m.start()] + " " + p.stem[m.end():]
+    key = re.sub(r"[^a-z0-9]+", " ", _CODES.sub(" ", rest).lower()).strip()
+    return f"{p.parent}/{key}{p.suffix.lower()}", n
+
+
+def _join_parts(items, files, decided, eps, root, layout, s, series_name, year) -> list[dict]:
+    by_rel = {f["rel"]: f for f in files}
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for f in files:
+        pk = part_of(f["rel"])
+        if pk:
+            groups.setdefault(pk[0], []).append((pk[1], f["rel"]))
+    joins, used = [], set()
+    for key, parts in groups.items():
+        nums = [n for n, _ in parts]
+        if len(parts) < 2 or len(set(nums)) != len(nums):
+            continue
+        parts.sort()
+        rels = [r for _, r in parts]
+        exp = [tuple(by_rel[r].get("expected") or []) for r in rels]
+        same_name = len(set(exp)) == 1 and len(exp[0]) == 1
+        found = [{c[1] for c in decided.get(r, []) if c[2] != "low"} for r in rels]
+        heard = set().union(*found)
+        # The parts must all be one episode: the dialogue says so for every part, or the
+        # names say so and the dialogue doesn't disagree. (Two TVDB episodes that are
+        # "Part 1" and "Part 2" of a story match different references: never joined.)
+        named = {c for e in exp for c in e}
+        if len(named) > 1 and all(c in eps for c in named):
+            # The names give each part its own TVDB episode ("… Final Battle (1)/(2)/(3)"
+            # as S08E27/E28/E29): those are separate episodes, kept as separate files,
+            # even when one reference matches them all (a transcript of the whole story).
+            continue
+        if len(heard) == 1 and all(fs == heard for fs in found):
+            code = next(iter(heard))
+            how = "the dialogue of every part matches it" + (" and so do the names" if same_name and exp[0][0] == code else "")
+        elif same_name and heard <= {exp[0][0]}:
+            code = exp[0][0]
+            how = "the parts are named for it" + (" and the dialogue agrees" if heard else "")
+        else:
+            continue
+        ep = eps.get(code)
+        if not ep:
+            continue
+        missing = sorted(set(range(1, max(nums) + 1)) - set(nums))
+        total = sum(float(by_rel[r].get("duration") or 0) for r in rels)
+        rt = float(ep.get("runtime") or 0)
+        too_long = bool(rt and total > 1.6 * rt * 60)
+        first = root / rels[0]
+        name = episode_filename(series_name, [ep], first.suffix, first.name, s, year)
+        target = season_dir(root, ep["season"], s, layout) / name
+        reason = (f"{len(rels)} parts of {code} — {how}. Joined into one file (lossless); the parts go "
+                  "to the backup folder.")
+        if missing:
+            reason += f" Part {', '.join(map(str, missing))} isn't here — check before joining."
+        if too_long:
+            reason += (f" Check first: together they run {total / 60:.0f} min, but TVDB gives {code} "
+                       f"{rt:.0f} min — they may be more than one episode.")
+        segs = []
+        offset = 0.0
+        for r in rels:
+            f = by_rel[r]
+            segs += [{**sg, "start": round(float(sg.get("start", 0)) + offset, 1),
+                      "end": round(float(sg.get("end", 0)) + offset, 1), "part": r}
+                     for sg in f.get("segments") or []]
+            offset += float(f.get("duration") or 0)
+        joins.append({"kind": "join", "source": rels[0], "sources": rels, "codes": [code],
+                      "status": "PARTS", "note": "", "text_source": by_rel[rels[0]].get("text_source"),
+                      "expected": sorted({c for e in exp for c in e}), "segments": segs,
+                      "targets": [{"path": str(target.relative_to(root)), "codes": [code]}],
+                      "reason": reason, "selected": not missing and not too_long,
+                      "durations": [float(by_rel[r].get("duration") or 0) for r in rels]})
+        used.update(rels)
+    if not joins:
+        return items
+    return joins + [it for it in items if it["source"] not in used]
+
+
 def build_plan(series: dict, scan: dict) -> list[dict]:
     s = get_settings()
     root = Path(series["path"])
@@ -592,8 +691,12 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
                       selected=bool(owner.get("selected")))
             moving.add(occ)
 
+    # 5. One episode in several files ("… - Part 1.mkv", "… - Part 2.mkv"): offer to join
+    #    them into one file, instead of keeping one and moving the rest aside.
+    items = _join_parts(items, files, decided, eps, root, layout, s, series_name, series.get("year"))
+
     for i, it in enumerate(items):
         it["id"] = i
-    order = {"split": 0, "rename": 1, "aside": 2, "review": 3, "ok": 4}
+    order = {"join": 0, "split": 0, "rename": 1, "aside": 2, "review": 3, "ok": 4}
     items.sort(key=lambda it: (order[it["kind"]], it["source"]))
     return items

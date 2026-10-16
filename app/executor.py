@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import db
 from .config import get_settings
-from .planner import backup_folder_name, backup_rel, backup_root, sidecars
+from .planner import ACTIONABLE, backup_folder_name, backup_rel, backup_root, sidecars
 from .media_text import SUB_EXTS
 
 
@@ -218,6 +218,49 @@ def _check_space(root: Path, split_sources: list[Path]) -> None:
                          "or untick the splits and apply the rest.")
 
 
+def _streams(p: Path) -> list[tuple]:
+    import json as _json
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                        "stream=codec_type,codec_name,width,height,sample_rate,channels",
+                        "-of", "json", str(p)], capture_output=True, text=True, timeout=120)
+    try:
+        st = _json.loads(r.stdout).get("streams") or []
+    except ValueError:
+        return []
+    return [(x.get("codec_type"), x.get("codec_name"), x.get("width"), x.get("height"),
+             x.get("sample_rate"), x.get("channels")) for x in st]
+
+
+def _join_mismatch(parts: list[Path]) -> str | None:
+    """Why these files can't be joined without re-encoding, or None if they can."""
+    if len({p.suffix.lower() for p in parts}) > 1:
+        return "they're different file types"
+    first = _streams(parts[0])
+    if not first:
+        return f"{parts[0].name} couldn't be read"
+    for p in parts[1:]:
+        if _streams(p) != first:
+            return f"{p.name} is encoded differently from {parts[0].name}"
+    return None
+
+
+def _ffmpeg_concat(parts: list[Path], dst: Path) -> None:
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as lst:
+        for p in parts:
+            lst.write("file '" + str(p.resolve()).replace("'", "'\\''") + "'\n")
+    try:
+        r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0",
+                            "-i", lst.name, "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero",
+                            "-max_muxing_queue_size", "4096", str(dst)],
+                           capture_output=True, text=True, timeout=3600)
+    finally:
+        Path(lst.name).unlink(missing_ok=True)
+    if r.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+        dst.unlink(missing_ok=True)
+        raise ApplyError(f"ffmpeg failed joining {parts[0].name}…: {r.stderr.strip()[-400:]}")
+
+
 def _ffmpeg_copy(src: Path, dst: Path, start: float | None, dur: float | None) -> None:
     # Seek near the cut first (fast), then trim on the file's own timestamps. Seeking
     # straight to the cut lands on the nearest *indexed* point, often a keyframe or two
@@ -295,8 +338,7 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
     migrate_legacy_backup(series, ctx)
     backup = backup_root(root)
     legacy, new = backup_folder_name() + "/", backup_rel(root) + "/"
-    items = [it for it in plan["items"] if it.get("selected") and
-             it["kind"] in ("rename", "split", "aside")]
+    items = [it for it in plan["items"] if it.get("selected") and it["kind"] in ACTIONABLE]
     for it in items:  # plans made before the backup folder moved out of the series
         for t in it.get("targets") or []:
             if legacy != new and t["path"].startswith(legacy):
@@ -306,16 +348,23 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
 
     # Validate first: every source must still exist, targets must be in the series folder.
     for it in items:
-        src = root / it["source"]
-        if not src.exists():
-            raise ApplyError(f"Source no longer exists: {it['source']} — rescan first.")
+        for rel in it.get("sources") or [it["source"]]:
+            if not (root / rel).exists():
+                raise ApplyError(f"Source no longer exists: {rel} — rescan first.")
         for t in it.get("targets") or []:
             p = (root / t["path"]).resolve()
             if root.resolve() not in p.parents and backup.resolve() not in p.parents:
                 raise ApplyError(f"Target escapes the series folder: {t['path']}")
 
-    _check_space(root, [root / it["source"] for it in items if it["kind"] == "split"])
-    if any(it["kind"] in ("split", "aside") for it in items):
+    for it in items:
+        if it["kind"] == "join":
+            why = _join_mismatch([root / r for r in it["sources"]])
+            if why:
+                raise ApplyError(f"Can't join the parts of {it['codes'][0]} losslessly: {why}. "
+                                 "Nothing was changed — untick that join and apply the rest.")
+    _check_space(root, [root / it["source"] for it in items if it["kind"] == "split"] +
+                 [root / r for it in items if it["kind"] == "join" for r in it["sources"]])
+    if any(it["kind"] in ("split", "aside", "join") for it in items):
         backup.mkdir(parents=True, exist_ok=True)
         mark_backup_folder(root)  # before the media server can see anything land there
 
@@ -333,7 +382,7 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
     # 1. Splits: write every piece to a temp name and check it (right length, plays at the
     # start and the end) before ANY original moves. A failed write (disk full, a damaged
     # source) stops here with nothing changed.
-    splits = []
+    splits, joins = [], []
     try:
         for it in [i for i in items if i["kind"] == "split"]:
             ctx.check_cancel()
@@ -368,12 +417,39 @@ def apply_plan(series: dict, plan: dict, ctx) -> dict:
                 raise ApplyError(f"Split of {it['source']} didn't come out right: {'; '.join(problems)}. "
                                  "Nothing was changed; every file is where it was.")
             ctx.log("    pieces checked: right length, play at start and end")
+        # Joins: the parts end to end in one file (stream copy), checked the same way.
+        for it in [i for i in items if i["kind"] == "join"]:
+            ctx.check_cancel()
+            parts = [root / r for r in it["sources"]]
+            final = root / it["targets"][0]["path"]
+            final.parent.mkdir(parents=True, exist_ok=True)
+            tmp = tmp_name(final, parts[0].suffix)
+            ctx.status(f"Joining {len(parts)} parts of {it['codes'][0]}")
+            ctx.log(f"Join {' + '.join(it['sources'])} → {it['targets'][0]['path']}")
+            joins.append((it, parts, tmp, final))
+            want = sum(_duration(p) or 0 for p in parts)
+            _ffmpeg_concat(parts, tmp)
+            why = _check_piece(tmp, want or None)
+            if why:
+                raise ApplyError(f"Joining the parts of {it['codes'][0]} didn't come out right: {why}. "
+                                 "Nothing was changed; every file is where it was.")
+            ctx.log(f"    joined file checked: {want / 60:.1f} min, plays at start and end")
     except BaseException:
         for _it, _src, pieces in splits:
             for tmp, *_ in pieces:
                 tmp.unlink(missing_ok=True)
+        for _it, _parts, tmp, _final in joins:
+            tmp.unlink(missing_ok=True)
         db.delete_apply(apply_id)
         raise
+    for it, parts, tmp, final in joins:
+        log.add({"op": "create", "dst": _rel(tmp, root), "note": f"joined {it['codes'][0]}"})
+        pending.append((tmp, final, f"join {it['codes'][0]}"))
+        for part in parts:
+            dst = _free(backup / "joined_parts" / part.relative_to(root))
+            for side in sidecars(part):
+                _move(side, _free(_sidecar_dst(side, part, dst)), log, root, "sidecar")
+            _move(part, dst, log, root, "joined part")
     for it, src, pieces in splits:
         for tmp, final, t, _want in pieces:
             log.add({"op": "create", "dst": _rel(tmp, root), "note": f"split piece of {it['source']}"})

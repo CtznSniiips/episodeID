@@ -65,9 +65,10 @@ const when = (iso) => iso ? new Date(iso).toLocaleString() : "";
 
 const STATUS_BADGE = {
   OK: "b-ok", OK_ORDER_DIFFERS: "b-warn", MISMATCH: "b-bad", LOW_CONFIDENCE: "b-warn",
-  NO_TEXT: "", NO_MATCH: "b-warn", ERROR: "b-bad", MANUAL: "b-info",
+  NO_TEXT: "", NO_MATCH: "b-warn", ERROR: "b-bad", MANUAL: "b-info", PARTS: "b-info",
 };
-const KIND_BADGE = { rename: "b-info", split: "b-warn", aside: "b-bad", review: "", ok: "b-ok" };
+const KIND_BADGE = { rename: "b-info", split: "b-warn", join: "b-warn", aside: "b-bad", review: "", ok: "b-ok" };
+const ACTIONABLE = ["rename", "split", "join", "aside"];
 
 // -------------------------------------------------------------------- theme
 // Auto (follow the system) → Light → Dark. Saved in this browser only.
@@ -460,11 +461,11 @@ async function tabPlan(reload = true) {
   const eps = Object.fromEntries((state.series.episodes || []).map((e) => [e.code, e]));
   const counts = {};
   plan.items.forEach((it) => counts[it.kind] = (counts[it.kind] || 0) + 1);
-  const actionable = plan.items.filter((it) => ["rename", "split", "aside"].includes(it.kind));
+  const actionable = plan.items.filter((it) => ACTIONABLE.includes(it.kind));
   const filters = [["actions", "Changes", actionable.length], ["review", "Needs review", counts.review || 0],
     ["ok", "Correct", counts.ok || 0], ["all", "All", plan.items.length]];
   const shown = plan.items.filter((it) => state.filter === "all" ? true :
-    state.filter === "actions" ? ["rename", "split", "aside"].includes(it.kind) : it.kind === state.filter);
+    state.filter === "actions" ? ACTIONABLE.includes(it.kind) : it.kind === state.filter);
   const applied = plan.status !== "draft";
   const selCount = actionable.filter((it) => it.selected).length;
 
@@ -524,7 +525,7 @@ function coverage(plan, series) {
   const add = (m, code, src) => { if (!m.has(code)) m.set(code, []); m.get(code).push(src); };
   for (const it of plan.items) {
     (it.expected || []).forEach((c) => add(now, c, it.source));
-    const acting = it.selected && ["rename", "split", "aside"].includes(it.kind);
+    const acting = it.selected && ACTIONABLE.includes(it.kind);
     if (!acting) { (it.expected || []).forEach((c) => add(after, c, it.source)); continue; }
     for (const t of it.targets || []) {
       if (t.duplicate) continue;
@@ -576,7 +577,7 @@ function coverageHtml(plan, series) {
 }
 
 function rowHtml(it, eps, applied) {
-  const actionable = ["rename", "split", "aside"].includes(it.kind);
+  const actionable = ACTIONABLE.includes(it.kind);
   const targets = (it.targets || []).map((t) =>
     `<div class="arrow">↳ <span class="path">${esc(t.path.replace(/^(\.\.\/)+/, ""))}</span>${t.duplicate ? ' <span class="badge b-bad">duplicate</span>' : ""}</div>`).join("");
   const segs = (it.segments || []).map((sg) => segHtml(sg, eps)).join("<br>") ||
@@ -591,7 +592,7 @@ function rowHtml(it, eps, applied) {
       <span class="badge ${STATUS_BADGE[it.status] || ""}">${esc(it.status)}</span>
       ${it.ai ? '<span class="badge b-ai">AI</span>' : ""}
       ${it.ref_warning ? '<span class="badge b-warn">check reference</span>' : ""}
-      <div class="path" style="margin-top:4px">${esc(it.source)}</div>${targets}
+      ${(it.sources || [it.source]).map((p) => `<div class="path" style="margin-top:4px">${it.sources ? "+ " : ""}${esc(p)}</div>`).join("")}${targets}
       ${it.kind === "split" && it.cuts ? `<div class="small" style="margin-top:2px"><span class="badge b-info">cut points chosen</span>
         ${it.cuts.map((c) => c == null ? "auto" : fmtCut(c)).join(", ")}</div>` : ""}
       <div class="muted small">${esc(it.reason || "")}</div></td>
@@ -838,6 +839,7 @@ function confirmApply(plan, items) {
   const n = (k) => items.filter((i) => i.kind === k).length;
   const box = modal(`<h2 style="margin-top:0">Apply ${items.length} changes?</h2>
     <ul><li>${n("rename")} renames</li><li>${n("split")} splits (lossless, original kept in the backup folder)</li>
+    ${n("join") ? `<li>${n("join")} joins of multi-part files (lossless, parts kept in the backup folder)</li>` : ""}
     <li>${n("aside")} files moved to the backup folder</li></ul>
     <p class="muted small">Nothing is deleted. Every step is logged and can be undone from the History tab.</p>
     <p>Type <b>APPLY</b> to continue:</p>

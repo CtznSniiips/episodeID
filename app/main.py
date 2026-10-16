@@ -694,7 +694,7 @@ def plan_select(pid: int, body: Selection):
     if plan["status"] != "draft":
         raise HTTPException(400, "Plan already applied")
     for it in plan["items"]:
-        if it["id"] in body.selected and it["kind"] in ("rename", "split", "aside"):
+        if it["id"] in body.selected and it["kind"] in ("rename", "split", "aside", "join"):
             it["selected"] = bool(body.selected[it["id"]])
     db.update_plan(pid, items=plan["items"])
     return {"ok": True}

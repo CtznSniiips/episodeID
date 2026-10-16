@@ -300,8 +300,22 @@ def _discount_unreferenced(segs: list[dict], expected: list[str], duration: floa
             continue
         pos = _expected_at(expected, (sg["start"] + sg["end"]) / 2, duration)
         cands = [pos] if pos else expected
-        if any(c in refs for c in cands) or float(sg.get("score") or 0) >= SAME_EPISODE_SCORE:
-            continue  # the filename's episode was a candidate, or this is plainly that episode
+        if any(c in refs for c in cands):
+            continue  # the filename's episode was a candidate
+        # A reference several times longer than this file's dialogue covers more than one
+        # episode (one wiki transcript for a three-part story): matching it says nothing
+        # about which of those episodes this is, however close the match.
+        words = sum(int(x.get("words") or 0) for x in segs) or 0
+        ref_words = len(str(refs.get(sg["code"]) or "").split())
+        broad = words >= 200 and ref_words >= 1.8 * words
+        if float(sg.get("score") or 0) >= SAME_EPISODE_SCORE and not broad:
+            continue  # plainly that episode
+        if broad:
+            sg.update(confidence="low", no_ref_for=cands[0], broad_ref=True,
+                      why=f"the reference for {sg['code']} is {ref_words / words:.1f}× as long as this file's "
+                          f"dialogue — it likely covers several episodes, so it can't tell them apart; "
+                          f"{' / '.join(cands)} (per the filename) has no reference of its own")
+            continue
         sg.update(confidence="low", no_ref_for=cands[0],
                   why=f"{' / '.join(cands)} (per the filename) has no reference yet, so the "
                       f"dialogue could only match other episodes — {sg['code']} was the closest")
@@ -871,8 +885,10 @@ def _plan_after_apply(series: dict, plan: dict, ctx) -> int | None:
     if not scan:
         return None
     root = Path(series["path"])
-    done = {it["source"]: it for it in plan["items"]
-            if it.get("selected") and it["kind"] in ("rename", "split", "aside")}
+    done = {rel: it for it in plan["items"]
+            if it.get("selected") and it["kind"] in ("rename", "split", "aside", "join")
+            for rel in (it.get("sources") or [it["source"]])}
+    joined: set[int] = set()
     opts = dict(series.get("options") or {})
     overrides = dict(opts.get("overrides") or {})
     files = []
@@ -884,6 +900,23 @@ def _plan_after_apply(series: dict, plan: dict, ctx) -> int | None:
             continue
         ov = overrides.get(f["rel"])  # kept under the old name too, for Undo
         if it["kind"] == "aside":
+            continue
+        if it["kind"] == "join":
+            if it["id"] in joined:
+                continue  # one file for all the parts, made at the first part
+            joined.add(it["id"])
+            t = it["targets"][0]
+            parts = {g["rel"]: g for g in scan["results"]["files"] if g["rel"] in it["sources"]}
+            segs, off = [], 0.0
+            for rel in it["sources"]:
+                g = parts.get(rel) or {}
+                segs += [{**sg, "start": float(sg.get("start", 0)) + off, "end": float(sg.get("end", 0)) + off}
+                         for sg in g.get("segments") or [] if sg.get("code") in t["codes"]]
+                off += float(g.get("duration") or 0)
+            g = {**f, "rel": t["path"], "expected": list(t["codes"]), "duration": round(off, 1),
+                 "segments": [{**segs[0], "start": 0.0, "end": round(off, 1)}] if segs else [],
+                 "joined_from": it["sources"], "title_cards": []}
+            files.append(_reclassified(g, root))
             continue
         if it["kind"] == "rename":
             t = it["targets"][0]
@@ -921,7 +954,7 @@ def _plan_after_apply(series: dict, plan: dict, ctx) -> int | None:
                                          "after_apply": plan["id"]})
     items = build_plan(db.get_series(series["id"]), db.get_scan(scan_id)["results"])
     plan_id = db.add_plan(series["id"], scan_id, items)
-    left = sum(1 for i in items if i["kind"] in ("rename", "split", "aside"))
+    left = sum(1 for i in items if i["kind"] in ("rename", "split", "aside", "join"))
     review = sum(1 for i in items if i["kind"] == "review")
     ctx.log(f"Plan updated: {left} change{'s' if left != 1 else ''} left, {review} to review.")
     return plan_id
@@ -939,6 +972,8 @@ def _reclassified(f: dict, root: Path) -> dict:
         f["note"] = f"renamed from {Path(f['renamed_from']).name}"
     elif f.get("split_from"):
         f["note"] = f"split from {Path(f['split_from']).name}"
+    elif f.get("joined_from"):
+        f["note"] = f"joined from {len(f['joined_from'])} parts"
     else:
         f["note"] = note
     return f
