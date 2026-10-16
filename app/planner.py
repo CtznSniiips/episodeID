@@ -341,6 +341,10 @@ def _segment_choice(seg: dict) -> tuple[str | None, str, bool]:
 
 
 ACTIONABLE = ("rename", "split", "aside", "join")
+# Bumped when build_plan learns something new (joins, …): a draft plan made by an older
+# version is rebuilt from its scan when it's next shown, so the new kinds of changes
+# appear without a rescan.
+PLAN_VERSION = 2
 
 # "… - Part 2", "…, Part II", "… Pt. 3", "… (Part 1)" — the last one in the name.
 _PART = re.compile(r"(?i)(?:\s*[-–,]\s*|\s+|\s*\(\s*)(?:part|pt\.?)\s*(\d{1,2}|[ivx]{1,4}|one|two|three|four|five|six)\b\s*\)?")
@@ -697,6 +701,7 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
 
     for i, it in enumerate(items):
         it["id"] = i
+        it["pv"] = PLAN_VERSION
     order = {"join": 0, "split": 0, "rename": 1, "aside": 2, "review": 3, "ok": 4}
     items.sort(key=lambda it: (order[it["kind"]], it["source"]))
     return items

@@ -147,3 +147,22 @@ for rel in (A1, A2, B1, B2, B3):
     assert (root / rel).exists(), rel
 assert not ta.exists()
 print("PASS")
+
+# A draft plan made before joins existed is made again when it's next shown — the join
+# appears without a rescan, and ticks on unchanged rows carry over.
+from fastapi.testclient import TestClient  # noqa: E402
+from app import main  # noqa: E402
+old_items = [{"id": 0, "kind": "ok", "source": A1, "selected": False, "expected": ["S03E04"], "segments": []},
+             {"id": 1, "kind": "aside", "source": A2, "selected": True, "expected": ["S03E04"], "segments": [],
+              "targets": [{"path": "x"}]},
+             {"id": 2, "kind": "ok", "source": Q1, "selected": False, "expected": ["S01E05"], "segments": []}]
+sid2 = db.add_scan(sid, scan)
+db.add_plan(sid, sid2, old_items)
+got = TestClient(main.app).get(f"/api/series/{sid}/plan").json()
+kinds = {(it["kind"], tuple(it.get("sources") or [it["source"]])) for it in got["items"]}
+print("  old plan shown as:", sorted(k for k, _ in kinds))
+assert ("join", (A1, A2)) in kinds and not any(k == "aside" and s == (A2,) for k, s in kinds)
+assert all(it.get("pv") for it in got["items"])
+html = TestClient(main.app).get("/").text
+assert "/static/app.js?v=" in html and "/static/style.css?v=" in html
+print("PASS (old plans rebuilt)")

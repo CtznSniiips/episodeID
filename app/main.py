@@ -679,9 +679,35 @@ def job_cancel(jid: int):
 
 @app.get("/api/series/{sid}/plan")
 def plan_get(sid: int):
-    db.get_series(sid) or _404()
+    series = db.get_series(sid) or _404()
     plan = db.latest_plan(sid)
+    if plan and plan["status"] == "draft" and plan.get("scan_id") and plan["items"]:
+        from .planner import PLAN_VERSION
+        if any(it.get("pv") != PLAN_VERSION for it in plan["items"]):
+            plan = _rebuild_plan(series, plan) or plan
     return plan or {"items": [], "id": None}
+
+
+def _rebuild_plan(series: dict, plan: dict) -> dict | None:
+    """A draft plan from an older version of EpisodeID, made again from the same scan.
+    Ticks and chosen cut points carry over to the same changes."""
+    from .planner import build_plan
+    scan = db.get_scan(plan["scan_id"])
+    if not scan:
+        return None
+    key = lambda it: (it["kind"], tuple(it.get("sources") or [it["source"]]),  # noqa: E731
+                      tuple(t["path"] for t in it.get("targets") or []))
+    old = {key(it): it for it in plan["items"]}
+    items = build_plan(series, scan["results"])
+    for it in items:
+        prev = old.get(key(it))
+        if prev:
+            it["selected"] = prev.get("selected", it["selected"])
+            if prev.get("cuts"):
+                it["cuts"] = prev["cuts"]
+    pid = db.add_plan(series["id"], plan["scan_id"], items)
+    log.info("series %s: plan #%s made again with this version's rules as #%s", series["id"], plan["id"], pid)
+    return db.get_plan(pid)
 
 
 class Selection(BaseModel):
@@ -847,4 +873,10 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    # Asset links carry their file's date, so a browser never runs an old app.js after
+    # an update.
+    html = (STATIC / "index.html").read_text()
+    for name in ("app.js", "style.css"):
+        v = int((STATIC / name).stat().st_mtime)
+        html = html.replace(f"/static/{name}\"", f"/static/{name}?v={v}\"")
+    return Response(html, media_type="text/html", headers={"Cache-Control": "no-cache"})
