@@ -210,6 +210,63 @@ def sonarr_compare(sid: int):
         raise HTTPException(502, str(e)) from e
 
 
+class SeasonPick(BaseModel):
+    seasons: list[int]
+
+
+@app.get("/api/series/{sid}/seasons")
+def seasons_get(sid: int):
+    from .seasons import seasons_status
+    return seasons_status(db.get_series(sid) or _404())
+
+
+@app.post("/api/series/{sid}/unmonitor")
+def seasons_unmonitor(sid: int, body: SeasonPick):
+    from . import sonarr
+    from .seasons import unmonitor
+    series = db.get_series(sid) or _404()
+    try:
+        r = unmonitor(series, body.seasons)
+    except (sonarr.SonarrError, KeyError) as e:
+        raise HTTPException(502, str(e)) from e
+    log.info("series %s: unmonitored seasons %s in Sonarr (%s episodes)", series["name"], r["seasons"], r["episodes"])
+    return r
+
+
+@app.get("/api/seasons")
+def seasons_all():
+    """Every series' complete seasons that Sonarr still monitors."""
+    from .seasons import seasons_status
+    out = []
+    for s in db.list_series():
+        st = seasons_status(db.get_series(s["id"]))
+        out.append({"id": s["id"], "name": s["name"], "sonarr": st["sonarr"],
+                    "eligible": [r["season"] for r in st["seasons"] if r["eligible"]],
+                    "seasons": len(st["seasons"]),
+                    "complete": sum(1 for r in st["seasons"] if r["complete"])})
+    return out
+
+
+class UnmonitorAll(BaseModel):
+    series: dict[int, list[int]]
+
+
+@app.post("/api/unmonitor")
+def seasons_unmonitor_all(body: UnmonitorAll):
+    from . import sonarr
+    from .seasons import unmonitor
+    out = []
+    for sid, seasons in body.series.items():
+        series = db.get_series(sid)
+        if not series or not seasons:
+            continue
+        try:
+            out.append({"id": sid, "name": series["name"], **unmonitor(series, seasons)})
+        except sonarr.SonarrError as e:
+            out.append({"id": sid, "name": series["name"], "error": str(e)})
+    return out
+
+
 @app.post("/api/sonarr/import-naming")
 def import_sonarr_naming():
     got = sonarr_naming()

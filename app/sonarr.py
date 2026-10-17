@@ -37,6 +37,19 @@ def _get(path: str, **params):
         raise SonarrError(f"Couldn't reach Sonarr: {e}") from e
 
 
+def _send(method: str, path: str, body) -> object:
+    s = get_settings()
+    if not configured():
+        raise SonarrError("Sonarr isn't set up (Settings → Sonarr).")
+    try:
+        r = httpx.request(method, f"{s['sonarr_url'].rstrip('/')}/api/v3/{path}", json=body,
+                          headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=60)
+        r.raise_for_status()
+        return r.json() if r.content else None
+    except (httpx.HTTPError, ValueError) as e:
+        raise SonarrError(f"Sonarr refused the change: {e}") from e
+
+
 def find_series(tvdb_id: int) -> dict | None:
     found = _get("series", tvdbId=tvdb_id)
     return next((x for x in found or [] if x.get("tvdbId") == tvdb_id), None)
@@ -102,3 +115,25 @@ def webhook_file(payload: dict) -> tuple[int | None, str | None, str]:
     f = payload.get("episodeFile") or {}
     rel = (f.get("relativePath") or "").replace("\\", "/") or None
     return s.get("tvdbId"), rel, ev
+
+
+def episodes(sonarr_series_id: int) -> list[dict]:
+    return _get("episode", seriesId=sonarr_series_id) or []
+
+
+def unmonitor_seasons(sonarr_series_id: int, seasons: list[int]) -> dict:
+    """Turn monitoring off for these seasons and their episodes (no more searches or
+    upgrades for them)."""
+    full = _get(f"series/{sonarr_series_id}")
+    changed = []
+    for se in full.get("seasons") or []:
+        if se.get("seasonNumber") in seasons and se.get("monitored"):
+            se["monitored"] = False
+            changed.append(se["seasonNumber"])
+    if changed:
+        _send("PUT", f"series/{sonarr_series_id}", full)
+    ids = [e["id"] for e in episodes(sonarr_series_id)
+           if e.get("seasonNumber") in seasons and e.get("monitored")]
+    if ids:
+        _send("PUT", "episode/monitor", {"episodeIds": ids, "monitored": False})
+    return {"seasons": sorted(set(seasons)), "season_flags": changed, "episodes": len(ids)}

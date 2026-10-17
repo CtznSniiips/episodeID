@@ -148,7 +148,8 @@ async function renderHome() {
   const [status, list] = await Promise.all([refreshChips(), api("/api/series")]);
   let html = `<div class="row"><div><h1>Series</h1>
     <div class="muted">Each series is a folder in your library matched to a TVDB show.</div></div>
-    <div class="spacer"></div><button class="btn primary" id="add">+ Add series</button></div>`;
+    <div class="spacer"></div><button class="btn" id="unmon-all" title="Every series: seasons where every aired episode has a correct file">Unmonitor complete seasons…</button>
+    <button class="btn primary" id="add">+ Add series</button></div>`;
   if (!status.tvdb) {
     html += `<div class="card" style="margin-top:16px">Start by adding your TVDB API key in
       <a href="#/settings">Settings</a> — EpisodeID uses TVDB episode numbering so names line up with Sonarr.</div>`;
@@ -172,6 +173,7 @@ async function renderHome() {
   }
   view.innerHTML = html;
   $("#add").onclick = () => addSeriesDialog();
+  $("#unmon-all").onclick = () => unmonitorAllDialog();
   $$(".series-card").forEach((c) => c.onclick = () => location.hash = `#/series/${c.dataset.id}`);
 }
 
@@ -481,6 +483,7 @@ async function tabPlan(reload = true) {
         `<button class="btn small ${state.filter === k ? "active" : ""}" data-f="${k}">${l} (${n})</button>`).join("")}</div>
       <div class="spacer"></div>
       <button class="btn small" id="sonarr-cmp" title="Check EpisodeID's view of this series' files against Sonarr's">Compare with Sonarr</button>
+      <button class="btn small" id="unmon" title="Seasons where every aired episode has a correct file: stop Sonarr searching for or upgrading them">Unmonitor complete seasons…</button>
       <span class="muted small">Plan #${plan.id} · ${esc(when(plan.created))}${applied ? " · <b>applied</b>" : ""}</span>
       ${applied ? "" : `<button class="btn primary" id="apply" ${selCount ? "" : "disabled"}>Apply ${selCount} change${selCount === 1 ? "" : "s"}…</button>`}
     </div>
@@ -521,6 +524,7 @@ async function tabPlan(reload = true) {
   const ap = $("#apply", tab);
   if (ap) ap.onclick = () => confirmApply(plan, actionable.filter((it) => it.selected));
   $("#sonarr-cmp", tab).onclick = () => sonarrCompareDialog();
+  $("#unmon", tab).onclick = () => unmonitorDialog();
 }
 
 // Which episodes have a file now, and which will after applying the ticked changes.
@@ -843,6 +847,81 @@ function setEpisodeDialog(source, current) {
   $("#ok", box).onclick = save;
   $("#codes", box).onkeydown = (e) => { if (e.key === "Enter") save(); };
   $("#codes", box).focus();
+}
+
+const UNMON_NOTE = `<p class="muted small">A season qualifies when every aired episode has a file EpisodeID found correct, the plan
+  has nothing left to change or review in it, no file in it changed since the last scan, and Sonarr has a file for every episode.
+  Unmonitoring stops Sonarr searching for and upgrading those episodes — a later "upgrade" can't bring in a wrongly labelled
+  release. Turn monitoring back on in Sonarr whenever you like.</p>`;
+
+function unmonitorDialog() {
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Unmonitor complete seasons</h2>
+      <div class="spacer"></div><button class="btn small" id="um-x" aria-label="Close">✕</button></div>
+    ${UNMON_NOTE}<div id="um-body" class="muted">Checking…</div>`);
+  $("#modal-box").style.width = "min(860px, 100%)";
+  $("#um-x", box).onclick = closeModal;
+  api(`/api/series/${state.series.id}/seasons`).then((r) => {
+    const body = $("#um-body", box);
+    body.classList.remove("muted");
+    const rows = r.seasons.map((x) => `<tr>
+      <td class="check">${x.eligible ? `<input type="checkbox" class="um" value="${x.season}" checked>` : ""}</td>
+      <td style="white-space:nowrap">${x.season === 0 ? "Specials" : `Season ${x.season}`}</td><td class="small">${x.have} / ${x.episodes}</td>
+      <td class="small">${x.monitored === false ? '<span class="badge">unmonitored</span>' : x.monitored ? '<span class="badge b-info">monitored</span>' : ""}</td>
+      <td class="small">${x.complete ? '<span class="badge b-ok">complete and correct</span> ' : ""}${esc(x.why)}</td></tr>`).join("");
+    body.innerHTML = (r.sonarr !== "ok" ? `<p><span class="badge b-bad">Sonarr</span> ${esc(r.sonarr)}</p>` : "") +
+      `<div style="max-height:55vh;overflow:auto"><table><tr><th></th><th>Season</th><th>Files</th><th>Sonarr</th><th></th></tr>${rows}</table></div>
+      <div class="row" style="margin-top:12px"><span class="small muted" id="um-out"></span><div class="spacer"></div>
+        <button class="btn" id="um-c">Close</button><button class="btn primary" id="um-go">Unmonitor ticked seasons</button></div>`;
+    $("#um-c", box).onclick = closeModal;
+    const sync = () => { const n = $$("input.um", box).filter((c) => c.checked).length;
+      $("#um-go", box).disabled = !n; $("#um-go", box).textContent = `Unmonitor ${n} season${n === 1 ? "" : "s"}`; };
+    $$("input.um", box).forEach((c) => c.onchange = sync); sync();
+    $("#um-go", box).onclick = async () => {
+      const seasons = $$("input.um", box).filter((c) => c.checked).map((c) => +c.value);
+      $("#um-go", box).disabled = true;
+      try {
+        const res = await api(`/api/series/${state.series.id}/unmonitor`, { method: "POST", body: { seasons } });
+        toast(`Unmonitored ${res.seasons.length} season${res.seasons.length === 1 ? "" : "s"} in Sonarr` +
+          (res.skipped.length ? ` (skipped ${res.skipped.join(", ")}: no longer complete)` : ""));
+        closeModal();
+      } catch (e) { $("#um-out", box).textContent = e.message; $("#um-go", box).disabled = false; }
+    };
+  }).catch((e) => { $("#um-body", box).innerHTML = `<span class="badge b-bad">Failed</span> ${esc(e.message)}`; });
+}
+
+function unmonitorAllDialog() {
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Unmonitor complete seasons — all series</h2>
+      <div class="spacer"></div><button class="btn small" id="um-x" aria-label="Close">✕</button></div>
+    ${UNMON_NOTE}<div id="um-body" class="muted">Checking every series with Sonarr…</div>`);
+  $("#modal-box").style.width = "min(860px, 100%)";
+  $("#um-x", box).onclick = closeModal;
+  api("/api/seasons").then((list) => {
+    const body = $("#um-body", box);
+    body.classList.remove("muted");
+    const rows = list.map((s) => `<tr><td>${esc(s.name)}</td><td class="small">${s.complete} of ${s.seasons} complete</td>
+      <td class="small">${s.sonarr !== "ok" ? `<span class="badge b-bad">Sonarr</span> ${esc(s.sonarr)}` :
+        s.eligible.length ? s.eligible.map((n) => `<label style="margin-right:8px"><input type="checkbox" class="um" data-sid="${s.id}" value="${n}" checked>
+          ${n === 0 ? "Specials" : `S${n}`}</label>`).join("") : '<span class="muted">nothing to unmonitor</span>'}</td></tr>`).join("");
+    body.innerHTML = `<div style="max-height:55vh;overflow:auto"><table><tr><th>Series</th><th>Seasons</th><th>Still monitored in Sonarr, complete</th></tr>${rows}</table></div>
+      <div class="row" style="margin-top:12px"><span class="small muted" id="um-out"></span><div class="spacer"></div>
+        <button class="btn" id="um-c">Close</button><button class="btn primary" id="um-go">Unmonitor</button></div>`;
+    $("#um-c", box).onclick = closeModal;
+    const sync = () => { const n = $$("input.um", box).filter((c) => c.checked).length;
+      $("#um-go", box).disabled = !n; $("#um-go", box).textContent = `Unmonitor ${n} season${n === 1 ? "" : "s"}`; };
+    $$("input.um", box).forEach((c) => c.onchange = sync); sync();
+    $("#um-go", box).onclick = async () => {
+      const series = {};
+      $$("input.um", box).filter((c) => c.checked).forEach((c) => (series[c.dataset.sid] = series[c.dataset.sid] || []).push(+c.value));
+      $("#um-go", box).disabled = true;
+      try {
+        const res = await api("/api/unmonitor", { method: "POST", body: { series } });
+        const n = res.reduce((a, r) => a + (r.seasons || []).length, 0);
+        const errs = res.filter((r) => r.error);
+        toast(`Unmonitored ${n} season${n === 1 ? "" : "s"} in Sonarr` + (errs.length ? ` — ${errs.length} series failed` : ""), 6000);
+        closeModal();
+      } catch (e) { $("#um-out", box).textContent = e.message; $("#um-go", box).disabled = false; }
+    };
+  }).catch((e) => { $("#um-body", box).innerHTML = `<span class="badge b-bad">Failed</span> ${esc(e.message)}`; });
 }
 
 function sonarrCompareDialog() {
