@@ -13,7 +13,7 @@ from .executor import (apply_plan, migrate_legacy_backup, sonarr_rescan, sonarr_
                        undo_apply)
 from .jobs import handler
 from .matcher import Matcher, classify, parse_filename_episodes
-from .media_text import get_dialogue
+from .media_text import cached_dialogue, get_dialogue
 from .planner import build_plan, list_videos
 from .references import (SAME_EPISODE_SCORE, detect_fandom_wiki, ep_code, load_refs, norm_title,
                          refresh_references, renumber_references,
@@ -225,6 +225,15 @@ def job_scan(ctx, params):
             read.append((v, rel, None, e))
     # 2. Match. Word weights come from the references and every file's dialogue.
     background = [" ".join(c[2] for c in dlg["cues"]) for _v, _r, dlg, _e in read if dlg and dlg["cues"]]
+    if params.get("only"):
+        # A few files only: the rest of the library's dialogue still sets the word weights
+        # (from the cache — files never read before aren't read now).
+        done = {r for _v, r, _d, _e in read}
+        for v in list_videos(root, s["backup_folder"]):
+            if str(v.relative_to(root)) not in done:
+                c = cached_dialogue(v)
+                if c and c.get("cues"):
+                    background.append(" ".join(x[2] for x in c["cues"]))
     matcher = Matcher(refs, s, background) if refs else None
     if matcher and len(refs) < 5:
         ctx.log(f"Only {len(refs)} reference(s): a dialogue match only counts when it's plainly that episode.")
@@ -260,6 +269,16 @@ def job_scan(ctx, params):
     if llm.available():
         _llm_pass(series, files, eps, refs, ctx)
 
+    if params.get("only"):
+        # Only some files were scanned: the rest keep what the last scan found (if they're
+        # still there), so the plan still covers the whole series.
+        prev = db.latest_scan(series["id"])
+        mine = {f["rel"] for f in files}
+        kept = [f for f in (prev["results"].get("files") or [] if prev else [])
+                if f["rel"] not in mine and (root / f["rel"]).exists()]
+        if kept:
+            ctx.log(f"Kept the last scan's results for the other {len(kept)} files.")
+        files = sorted(kept + files, key=lambda f: f["rel"])
     counts: dict[str, int] = {}
     for f in files:
         counts[f["status"]] = counts.get(f["status"], 0) + 1
@@ -268,9 +287,16 @@ def job_scan(ctx, params):
     items = build_plan(db.get_series(series["id"]), db.latest_scan(series["id"])["results"])
     plan_id = db.add_plan(series["id"], scan_id, items)
     ctx.log("Summary: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
-    if not params.get("only"):
+    if params.get("imported"):
+        autocheck.note_imports(series, [f for f in files if f["rel"] in set(params["only"])], ctx)
+    if params.get("only"):
+        autocheck.record_files(series, [str(v.relative_to(root)) for v in videos])
+        autocheck.check(db.get_series(series["id"]), submit=False)  # refresh the card's flag
+    else:
         autocheck.record(series)
-    return {"scan_id": scan_id, "plan_id": plan_id, "counts": counts}
+    return {"scan_id": scan_id, "plan_id": plan_id, "counts": counts, "files": [
+        {"rel": f["rel"], "status": f["status"], "note": f.get("note", "")} for f in files
+        if not params.get("only") or f["rel"] in set(params["only"])]}
 
 
 # ------------------------------------------------------------- title cards

@@ -78,7 +78,8 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 | `SUBTITLE_LANGUAGE` | `en` | Reference language and embedded-track preference |
 | `WHISPER_ENABLED` / `WHISPER_MODEL` / `WHISPER_DEVICE` | `true` / `small` / `auto` | |
 | `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | off | e.g. `http://ollama:11434/v1`, `qwen3:8b` |
-| `SONARR_URL`, `SONARR_API_KEY` | | Triggers a series rescan after apply/undo; *Copy from Sonarr* (Settings → Naming) copies its naming settings |
+| `SONARR_URL`, `SONARR_API_KEY` | | Triggers a series rescan after apply/undo; *Copy from Sonarr* (Settings → Naming) copies its naming settings; *Compare with Sonarr*; the import webhook |
+| `SONARR_IMPORT_SCAN` | `true` | Scan files as Sonarr imports them (needs the webhook, below) |
 | `NAMING_FORMAT` | `{series} - S{season:02d}E{episode:02d} - {title} {quality}` | Sonarr's tokens work too (`{Series Title}`, `{Series TitleYear}`, `{season:00}`, `{Episode Title}`, `{Episode CleanTitle}`, `{Quality Full}`, …). Quality is carried over from the old filename; MediaInfo and release-group tokens are left out |
 | `REPLACE_ILLEGAL_CHARACTERS` | `true` | As Sonarr: `\ /` → `+`, `?` → `!`, `*` → `-`, `< > \| "` removed (`false`: all removed) |
 | `COLON_REPLACEMENT` | `smart` | As Sonarr: `smart` ("Title: Subtitle" → "Title - Subtitle"), `delete`, `dash`, `space_dash`, `space_dash_space`, `custom` (+ `COLON_REPLACEMENT_CUSTOM`) |
@@ -88,6 +89,10 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 | `MIN_SCORE`, `MIN_MARGIN`, `MIN_SEGMENT_SECONDS` | `0.12`, `0.04`, `240` | Matching thresholds |
 
 `{series}` defaults to the series folder name; change it per series under *Series options*.
+
+**Scan new downloads**: in Sonarr, *Settings → Connect → + → Webhook*, URL `http://EPISODEID:8686/api/sonarr/webhook`, method POST, triggers *On Import* (*On File Import* in v4) and *On Upgrade*; add the username and password if you've set a login. When Sonarr imports a file into a series EpisodeID has scanned, EpisodeID fetches any missing references and scans just that file; if its content doesn't match its name, the series card shows "⚑ new download doesn't match its name" and the plan row is marked *new download*. Turn it off with `SONARR_IMPORT_SCAN=false`. Scanning only some files keeps every other file's last results, so the plan still covers the whole series.
+
+**Compare with Sonarr** (Plan tab) checks the series' files against Sonarr's file list, matched by path inside the series folder: files Sonarr maps to different episodes than their names say, files Sonarr hasn't imported (it counts those episodes as missing), and files Sonarr lists that aren't in the folder.
 
 **Copy from Sonarr** reads Sonarr's Media Management naming (episode format, season folder, colon replacement, illegal characters, multi-episode style) and saves it here; settings locked by environment variables are left alone. It also lists any series Sonarr treats as *anime* or *daily*: Sonarr names those by absolute number or air date, while EpisodeID always uses season and episode numbers. Scans of such a series say so in the log too.
 

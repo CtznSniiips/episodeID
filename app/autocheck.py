@@ -60,6 +60,42 @@ def record(series: dict) -> None:
     st = load_state(series["id"])
     st.update(files=snapshot(series), recorded_at=db.now())
     st.pop("pending", None)  # scanned / applied: nothing waiting any more
+    st["imports"] = [x for x in st.get("imports") or [] if x.get("ok")]  # a full scan covers them
+    _save_state(series["id"], st)
+
+
+GOOD = ("OK", "MANUAL")
+
+
+def note_imports(series: dict, files: list[dict], ctx=None) -> None:
+    """Remember how files Sonarr just imported came out; the card flags the ones whose
+    content doesn't match their name."""
+    st = load_state(series["id"])
+    imp = [x for x in st.get("imports") or [] if x["rel"] not in {f["rel"] for f in files}]
+    for f in files:
+        ok = f["status"] in GOOD
+        imp.append({"rel": f["rel"], "at": db.now(), "status": f["status"], "ok": ok,
+                    "note": (f.get("note") or "")[:300]})
+        if ctx:
+            ctx.log(f"Sonarr import {f['rel']}: " + ("matches its name." if ok else
+                    f"{f['status']} — {f.get('note') or 'check it in the plan'}"))
+    st["imports"] = imp[-30:]
+    _save_state(series["id"], st)
+
+
+def record_files(series: dict, rels: list[str]) -> None:
+    """Remember just these files as they are now (after scanning only them); the flag
+    stays for other changes."""
+    root = Path(series["path"])
+    st = load_state(series["id"])
+    if "files" not in st:
+        return  # no baseline yet: the next full check starts one
+    for rel in rels:
+        try:
+            x = (root / rel).stat()
+            st["files"][rel] = f"{x.st_size}:{x.st_mtime_ns}"
+        except OSError:
+            st["files"].pop(rel, None)
     _save_state(series["id"], st)
 
 

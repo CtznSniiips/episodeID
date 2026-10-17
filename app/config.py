@@ -51,6 +51,8 @@ SCHEMA: dict[str, tuple[object, str, bool]] = {
     "sonarr_url": ("", "SONARR_URL", False),
     "sonarr_api_key": ("", "SONARR_API_KEY", True),
     "sonarr_rescan_after_apply": (True, "SONARR_RESCAN_AFTER_APPLY", False),
+    # Scan a file as soon as Sonarr imports it (Sonarr → Connect → Webhook → /api/sonarr/webhook)
+    "sonarr_import_scan": (True, "SONARR_IMPORT_SCAN", False),
     # Matching
     "window_seconds": (90, "WINDOW_SECONDS", False),
     "window_step_seconds": (45, "WINDOW_STEP_SECONDS", False),

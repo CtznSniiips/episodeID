@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -156,6 +156,58 @@ def sonarr_naming(s: dict | None = None) -> dict:
                          + (" and absolute episode numbers" if kind == "anime" else " (air dates)")
                          + "; EpisodeID uses season and episode numbers, so its names will differ from Sonarr's.")
     return {"settings": new, "notes": notes}
+
+
+@app.post("/api/sonarr/webhook")
+async def sonarr_webhook(request: Request):
+    """Sonarr → Settings → Connect → Webhook (On Import / On Upgrade). The imported file is
+    scanned on its own; its series' card is flagged if its content doesn't match its name."""
+    from . import sonarr
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Expected Sonarr's webhook JSON")
+    tvdb_id, rel, event = sonarr.webhook_file(payload)
+    if event == "Test":
+        log.info("Sonarr webhook test received")
+        return {"ok": True, "message": "EpisodeID received the test."}
+    if event != "Download":
+        return {"ignored": f"{event or 'unknown'} event"}
+    if not get_settings()["sonarr_import_scan"]:
+        return {"ignored": "scanning imports is turned off (Settings → Sonarr)"}
+    series = next((db.get_series(s["id"]) for s in db.list_series() if s["tvdb_id"] == tvdb_id), None)
+    if not series:
+        return {"ignored": f"no series in EpisodeID for TVDB {tvdb_id}"}
+    if not rel or not (Path(series["path"]) / rel).is_file():
+        log.warning("Sonarr import for %s: %s isn't in %s", series["name"], rel, series["path"])
+        return {"ignored": f"{rel} isn't in {series['path']}"}
+    if db.latest_scan_summary(series["id"]) is None:
+        return {"ignored": "this series hasn't been scanned yet — scan it once first"}
+    jobs.submit("fetch_refs", series["id"], {"auto": True})
+    job = jobs.submit("scan", series["id"], {"only": [rel], "imported": True})
+    log.info("Sonarr imported %s / %s — scanning it (job %s)", series["name"], rel, job)
+    return {"queued": job, "series": series["name"], "file": rel}
+
+
+@app.get("/api/series/{sid}/sonarr-compare")
+def sonarr_compare(sid: int):
+    """Where EpisodeID's view of the series' files and Sonarr's disagree."""
+    from . import sonarr
+    from .matcher import parse_filename_episodes
+    from .planner import list_videos
+    series = db.get_series(sid) or _404()
+    root = Path(series["path"])
+    scan = db.latest_scan(sid)
+    files = [f for f in (scan["results"]["files"] if scan else []) if (root / f["rel"]).exists()]
+    seen = {f["rel"] for f in files}
+    for v in list_videos(root, get_settings()["backup_folder"]):  # files added since the scan
+        rel = str(v.relative_to(root))
+        if rel not in seen:
+            files.append({"rel": rel, "expected": parse_filename_episodes(v.name)})
+    try:
+        return sonarr.compare(series, files)
+    except sonarr.SonarrError as e:
+        raise HTTPException(502, str(e)) from e
 
 
 @app.post("/api/sonarr/import-naming")
@@ -425,7 +477,9 @@ def _series_out(s: dict, full: bool = False) -> dict:
     from .autocheck import load_state
     ac = load_state(s["id"])
     pend = {k: v for k, v in (ac.get("pending") or {}).items() if k != "files"} or None
-    out["file_check"] = {"checked_at": ac.get("checked_at"), "pending": pend}
+    root = Path(s["path"])
+    flagged = [x for x in ac.get("imports") or [] if not x.get("ok") and (root / x["rel"]).exists()]
+    out["file_check"] = {"checked_at": ac.get("checked_at"), "pending": pend, "imports": flagged}
     if full:
         misses = _load_misses(s["tvdb_id"])
         out["episodes"] = [{

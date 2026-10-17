@@ -202,6 +202,14 @@ def extract_embedded(video: Path, info: dict, lang: str) -> tuple[list[Cue], str
     return (cues, f"embedded #{best['index']}") if cues else None
 
 
+def cached_dialogue(video: Path) -> dict | None:
+    """The dialogue already read from this file, or None — never reads the file."""
+    try:
+        return json.loads(_cache_file(video).read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def get_dialogue(video: Path, ctx=None, allow_whisper: bool = True) -> dict:
     """Returns {"source": str, "duration": float, "cues": [[start, end, text], ...]}.
     source is "none" when no text could be produced."""

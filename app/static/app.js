@@ -165,7 +165,7 @@ async function renderHome() {
         <div class="small muted">References: ${s.reference_count} / ${s.episode_count} episodes</div>
         <div class="bar"><div style="width:${pct}%"></div></div>
         <div class="counts">${counts}</div>
-        ${fileCheckLine(s.file_check)}
+        ${fileCheckLine(s.file_check)}${s.file_check && s.file_check.checked_at ? importLine(s.file_check) : ""}
         ${s.active_job ? `<div class="small"><span class="badge b-info">${esc(s.active_job.kind)} running…</span></div>` : ""}
       </div>`;
     }).join("") + `</div>`;
@@ -180,8 +180,15 @@ function ago(iso) {
   return h < 1 ? "under an hour ago" : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} days ago`;
 }
 
+function importLine(fc) {
+  const bad = (fc && fc.imports) || [];
+  if (!bad.length) return "";
+  return `<div class="small" title="${esc(bad.map((x) => `${x.rel}: ${x.status} — ${x.note}`).join("\n"))}">
+    <span class="badge b-bad">⚑ ${bad.length} new download${bad.length === 1 ? "" : "s"} ${bad.length === 1 ? "doesn't" : "don't"} match ${bad.length === 1 ? "its name" : "their names"}</span></div>`;
+}
+
 function fileCheckLine(fc) {
-  if (!fc || !fc.checked_at) return "";
+  if (!fc || !fc.checked_at) return importLine(fc);
   const p = fc.pending;
   if (!p) return `<div class="small muted">Files checked ${ago(fc.checked_at)} · no changes since the last scan</div>`;
   const what = [p.added && `${p.added} new`, p.changed && `${p.changed} replaced`, p.removed && `${p.removed} removed`]
@@ -473,6 +480,7 @@ async function tabPlan(reload = true) {
       <div class="filters">${filters.map(([k, l, n]) =>
         `<button class="btn small ${state.filter === k ? "active" : ""}" data-f="${k}">${l} (${n})</button>`).join("")}</div>
       <div class="spacer"></div>
+      <button class="btn small" id="sonarr-cmp" title="Check EpisodeID's view of this series' files against Sonarr's">Compare with Sonarr</button>
       <span class="muted small">Plan #${plan.id} · ${esc(when(plan.created))}${applied ? " · <b>applied</b>" : ""}</span>
       ${applied ? "" : `<button class="btn primary" id="apply" ${selCount ? "" : "disabled"}>Apply ${selCount} change${selCount === 1 ? "" : "s"}…</button>`}
     </div>
@@ -512,6 +520,7 @@ async function tabPlan(reload = true) {
   });
   const ap = $("#apply", tab);
   if (ap) ap.onclick = () => confirmApply(plan, actionable.filter((it) => it.selected));
+  $("#sonarr-cmp", tab).onclick = () => sonarrCompareDialog();
 }
 
 // Which episodes have a file now, and which will after applying the ticked changes.
@@ -592,6 +601,7 @@ function rowHtml(it, eps, applied) {
       <span class="badge ${STATUS_BADGE[it.status] || ""}">${esc(it.status)}</span>
       ${it.ai ? '<span class="badge b-ai">AI</span>' : ""}
       ${it.ref_warning ? '<span class="badge b-warn">check reference</span>' : ""}
+      ${((state.series.file_check || {}).imports || []).some((x) => (it.sources || [it.source]).includes(x.rel)) ? '<span class="badge b-bad" title="Sonarr imported this file recently and its content doesn\'t match its name">new download</span>' : ""}
       ${(it.sources || [it.source]).map((p) => `<div class="path" style="margin-top:4px">${it.sources ? "+ " : ""}${esc(p)}</div>`).join("")}${targets}
       ${it.kind === "split" && it.cuts ? `<div class="small" style="margin-top:2px"><span class="badge b-info">cut points chosen</span>
         ${it.cuts.map((c) => c == null ? "auto" : fmtCut(c)).join(", ")}</div>` : ""}
@@ -833,6 +843,27 @@ function setEpisodeDialog(source, current) {
   $("#ok", box).onclick = save;
   $("#codes", box).onkeydown = (e) => { if (e.key === "Enter") save(); };
   $("#codes", box).focus();
+}
+
+function sonarrCompareDialog() {
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">EpisodeID vs Sonarr</h2>
+      <div class="spacer"></div><button class="btn small" id="sc-x" aria-label="Close">✕</button></div>
+    <div id="sc-body" class="muted" style="margin-top:10px">Asking Sonarr…</div>`);
+  $("#modal-box").style.width = "min(960px, 100%)";
+  $("#sc-x", box).onclick = closeModal;
+  const KIND = { differs: ["b-warn", "different episodes"], not_imported: ["b-bad", "not in Sonarr"],
+                 sonarr_only: ["b-bad", "only in Sonarr"] };
+  api(`/api/series/${state.series.id}/sonarr-compare`).then((r) => {
+    const head = `<p class="small">Sonarr has ${r.files.sonarr} file${r.files.sonarr === 1 ? "" : "s"} for
+      <b>${esc(r.sonarr_title)}</b>; EpisodeID sees ${r.files.episodeid}. Files are matched by their path inside the series folder.
+      ${r.sonarr_type && r.sonarr_type !== "standard" ? `<br><span class="badge b-warn">${esc(r.sonarr_type)}</span> Sonarr numbers this series differently, so differences are expected.` : ""}</p>`;
+    $("#sc-body", box).classList.remove("muted");
+    $("#sc-body", box).innerHTML = head + (r.rows.length ? `<div style="max-height:60vh;overflow:auto"><table>
+      <tr><th>File</th><th>Difference</th></tr>${r.rows.map((x) => `<tr>
+        <td class="path">${esc(x.rel)}</td>
+        <td class="small"><span class="badge ${KIND[x.kind][0]}">${KIND[x.kind][1]}</span> ${esc(x.why)}</td></tr>`).join("")}
+      </table></div>` : `<div class="badge b-ok">✓ They agree on every file</div>`);
+  }).catch((e) => { $("#sc-body", box).innerHTML = `<span class="badge b-bad">Failed</span> ${esc(e.message)}`; });
 }
 
 function confirmApply(plan, items) {
@@ -1142,6 +1173,7 @@ async function renderSettings() {
     ${f("sonarr_url", "URL", "e.g. http://192.168.1.10:8989")}
     ${f("sonarr_api_key", "API key", "", "password")}
     ${cb("sonarr_rescan_after_apply", "Rescan after apply / undo")}
+    ${cb("sonarr_import_scan", "Scan new downloads", `When Sonarr imports a file, scan just that file and flag the series if its content doesn't match its name. In Sonarr: Settings → Connect → + → Webhook, URL <span class="mono">${esc(location.origin)}/api/sonarr/webhook</span>, method POST, triggers On Import / On File Import and On Upgrade (add the username and password if you've set a login here). The series must have been scanned once.`)}
     ${test("sonarr")}</fieldset>
   <fieldset><legend>Naming</legend>
     <div class="row" style="justify-content:flex-end;margin-bottom:8px"><span class="small muted" id="naming-import-out"></span>
