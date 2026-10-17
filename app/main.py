@@ -763,7 +763,7 @@ def titlecard_check(sid: int, body: CardCheckReq):
 @app.post("/api/series/{sid}/jobs")
 def start_job(sid: int, body: JobReq):
     db.get_series(sid) or _404()
-    if body.kind not in ("refresh_episodes", "fetch_refs", "scan", "replan"):
+    if body.kind not in ("refresh_episodes", "fetch_refs", "scan", "replan", "ai_check"):
         raise HTTPException(400, "Unknown job")
     if db.active_job(sid):
         raise HTTPException(409, "A job is already running for this series")

@@ -251,6 +251,7 @@ def job_scan(ctx, params):
         res = matcher.match_file(dlg["cues"], dlg["duration"]) if matcher and dlg["cues"] \
             else {"segments": [], "whole": []}
         _discount_unreferenced(res["segments"], expected, dlg["duration"], refs)
+        res["segments"] = _story_parts(res["segments"], expected, eps, dlg["duration"])
         status, note = classify(expected, res["segments"], dlg["source"])
         files.append({"rel": rel, "size": v.stat().st_size, "duration": dlg["duration"],
                       "text_source": dlg["source"], "expected": expected,
@@ -345,6 +346,72 @@ def _discount_unreferenced(segs: list[dict], expected: list[str], duration: floa
         sg.update(confidence="low", no_ref_for=cands[0],
                   why=f"{' / '.join(cands)} (per the filename) has no reference yet, so the "
                       f"dialogue could only match other episodes — {sg['code']} was the closest")
+
+
+def _story(eps: dict, code: str) -> list[str]:
+    """The episodes TVDB splits one story into, around `code`: neighbours in the same
+    season with the same title apart from "(1)" / "(2)" / "Part 2" (The Office's
+    "Dunder Mifflin Infinity (1)" and "(2)")."""
+    from .planner import _MULTI_PART
+    e = eps.get(code)
+    if not e or not e.get("title"):
+        return [code]
+    base = _MULTI_PART.sub("", e["title"]).strip().lower()
+    if base == e["title"].strip().lower():
+        return [code]  # no part marker: a story of its own
+    out = []
+    for k in range(-4, 5):
+        c = ep_code(e["season"], e["episode"] + k)
+        x = eps.get(c)
+        if x and _MULTI_PART.sub("", x.get("title") or "").strip().lower() == base:
+            out.append(c)
+    return sorted(out)
+
+
+def _story_parts(segs: list[dict], expected: list[str], eps: dict, duration: float) -> list[dict]:
+    """A story TVDB splits into parts ("… (1)", "… (2)") often has one subtitle or
+    transcript for the whole hour, filed under one of the parts. Matched against it, a
+    file holding the whole story reads as that one part from start to finish — so a
+    correctly named S04E03E04 looked like S04E04 alone. When a match runs much longer
+    than that part does on TVDB and the filename names parts of the same story, the
+    match can't tell the parts apart: it confirms the filename's parts. When the file
+    holds more parts than its name says, it goes to review with the parts named."""
+    out = []
+    for sg in segs:
+        code = sg.get("code")
+        e = eps.get(code) or {}
+        rt = float(e.get("runtime") or 0) * 60
+        span = float(sg.get("end", 0)) - float(sg.get("start", 0))
+        story = _story(eps, code) if code else [code]
+        named = [c for c in expected if c in story]
+        if (sg.get("override") or len(story) < 2 or not named or not rt or span < 1.5 * rt
+                or sg.get("confidence") not in ("high", "low")):
+            out.append(sg)
+            continue
+        parts_here = min(len(story), max(1, round(span / rt)))
+        title = _MULTI_PART_TITLE(e.get("title"))
+        if parts_here <= len(named):
+            # The filename's parts of this story, one after the other across the match.
+            a, step = float(sg.get("start", 0)), span / len(named)
+            for i, c in enumerate(named):
+                out.append({**sg, "code": c, "start": round(a + i * step, 1), "end": round(a + (i + 1) * step, 1),
+                            "confidence": "high", "story": story,
+                            "why": f"one reference holds the whole of '{title}' (it matched {span / 60:.0f} min, "
+                                   f"TVDB gives each part {rt / 60:.0f}) — so it confirms {', '.join(named)} "
+                                   "(the filename) rather than telling the parts apart"})
+        else:
+            likely = story[:parts_here] if len(story) >= parts_here else story
+            out.append({**sg, "code": named[0], "confidence": "low", "story": story,
+                        "why": f"this runs {span / 60:.0f} min — about {parts_here} parts of '{title}' "
+                               f"({', '.join(likely)}), but the filename names {', '.join(named)}; one reference "
+                               "holds the whole story, so it can't tell the parts apart. If the file has them all, "
+                               f"set it to {''.join([likely[0]] + [c[c.index('E'):] for c in likely[1:]])}"})
+    return out
+
+
+def _MULTI_PART_TITLE(t: str | None) -> str:
+    from .planner import _MULTI_PART
+    return _MULTI_PART.sub("", t or "").strip()
 
 
 def _expected_at(expected: list[str], t: float, duration: float) -> str | None:
@@ -852,42 +919,87 @@ def _llm_pass(series, files, eps, refs, ctx):
     for n, f in enumerate(todo):
         ctx.check_cancel()
         ctx.progress(n / len(todo), f"AI: {Path(f['rel']).name}")
-        dlg = get_dialogue(Path(series["path"]) / f["rel"], ctx)
-        segs = f["segments"]
-        if not segs:
-            segs = [{"start": 0, "end": dlg["duration"], "code": None, "score": 0,
-                     "margin": 0, "confidence": "none", "alternatives": []}]
-            f["segments"] = segs
-        for sg in segs:
-            if sg["confidence"] == "high":
-                continue
-            cands: list[str] = []
-            seasons = {c[:3] for c in f["expected"]}
-            pool = (list(f["expected"]) + ([sg["code"]] if sg["code"] else []) +
-                    [a["code"] for a in sg.get("alternatives") or []] +
-                    [w["code"] for w in f.get("whole") or []] +
-                    [c for c in no_ref if c[:3] in seasons] + no_ref)
-            for c in pool:
-                if c in eps and c not in claimed and c not in cands:
-                    cands.append(c)
-                if len(cands) >= 12:
-                    break
-            if not cands:
-                continue
-            text = " ".join(c[2] for c in dlg["cues"] if c[1] > sg["start"] and c[0] < sg["end"])
-            try:
-                verdict = llm.judge(text, [{"code": c, "title": eps[c]["title"],
-                                            "overview": eps[c]["overview"]} for c in cands],
-                                    series["name"])
-            except Exception as e:  # noqa: BLE001
-                ctx.log(f"  AI error: {e}")
-                return
-            if verdict:
-                sg["llm"] = verdict
-                ctx.log(f"  {f['rel']}: AI suggests {verdict['code']} "
-                        f"({verdict['confidence']:.0%}) — {verdict['reason']}")
-            else:
-                ctx.log(f"  {f['rel']}: AI had no confident answer")
+        if _llm_file(series, f, eps, claimed, no_ref, ctx) is False:
+            return
+
+
+def _llm_file(series, f, eps, claimed, no_ref, ctx, force: bool = False):
+    """Ask the AI about one file's unsettled segments (force: every segment). Returns
+    False if the AI endpoint failed."""
+    dlg = get_dialogue(Path(series["path"]) / f["rel"], ctx)
+    segs = f["segments"]
+    if not segs:
+        segs = [{"start": 0, "end": dlg["duration"], "code": None, "score": 0,
+                 "margin": 0, "confidence": "none", "alternatives": []}]
+        f["segments"] = segs
+    for sg in segs:
+        if sg["confidence"] == "high" and not force:
+            continue
+        cands: list[str] = []
+        seasons = {c[:3] for c in f["expected"]}
+        pool = (list(f["expected"]) + ([sg["code"]] if sg["code"] else []) +
+                [a["code"] for a in sg.get("alternatives") or []] +
+                [w["code"] for w in f.get("whole") or []] +
+                [c for c in no_ref if c[:3] in seasons] + no_ref)
+        for c in pool:
+            if c in eps and (c not in claimed or c in f["expected"] or c == sg["code"]) and c not in cands:
+                cands.append(c)
+            if len(cands) >= 12:
+                break
+        if not cands:
+            continue
+        text = " ".join(c[2] for c in dlg["cues"] if c[1] > sg["start"] and c[0] < sg["end"])
+        try:
+            verdict = llm.judge(text, [{"code": c, "title": eps[c]["title"],
+                                        "overview": eps[c].get("overview")} for c in cands],
+                                series["name"])
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"  AI error: {e}")
+            return False
+        where = f" ({_fmt_t(sg['start'])}–{_fmt_t(sg['end'])})" if len(segs) > 1 else ""
+        if verdict:
+            sg["llm"] = verdict
+            ctx.log(f"  {f['rel']}{where}: AI suggests {verdict['code']} "
+                    f"({verdict['confidence']:.0%}) — {verdict['reason']}")
+            if force and sg["confidence"] == "high" and verdict["code"] != sg["code"]:
+                ctx.log(f"  (the dialogue match {sg['code']} is confident, so the plan keeps it; "
+                        "use Set episode if the AI is right)")
+        else:
+            ctx.log(f"  {f['rel']}{where}: AI had no confident answer")
+    return True
+
+
+@handler("ai_check")
+def job_ai_check(ctx, params):
+    """Ask the AI about one file now (the Ask AI button)."""
+    series = _series(ctx)
+    if not llm.available():
+        raise RuntimeError("The AI isn't set up (Settings → AI fallback).")
+    scan = db.latest_scan(series["id"])
+    if not scan:
+        raise RuntimeError("Scan the series first.")
+    files = [dict(f) for f in scan["results"]["files"]]
+    f = next((x for x in files if x["rel"] == params.get("source")), None)
+    if not f:
+        raise RuntimeError("That file isn't in the last scan — scan again.")
+    eps = {ep_code(e["season"], e["episode"]): e for e in series["episodes"]}
+    refs = load_refs(series["tvdb_id"])
+    claimed = {sg["code"] for g in files if g is not f for sg in g.get("segments") or [] if sg["confidence"] == "high"}
+    no_ref = [c for c in eps if c not in refs and eps[c]["season"] > 0]
+    f["segments"] = [dict(sg) for sg in f.get("segments") or []]
+    ctx.log(f"Asking {get_settings()['llm_model']} about {f['rel']}")
+    if _llm_file(series, f, eps, claimed, no_ref, ctx, force=True) is False:
+        raise RuntimeError("The AI endpoint didn't answer — see the log.")
+    scan_id = db.add_scan(series["id"], {**scan["results"], "files": files})
+    old = db.latest_plan(series["id"])
+    items = build_plan(db.get_series(series["id"]), db.get_scan(scan_id)["results"])
+    key = lambda it: (it["kind"], tuple(it.get("sources") or [it["source"]]),  # noqa: E731
+                      tuple(t["path"] for t in it.get("targets") or []))
+    prev = {key(it): it for it in (old or {}).get("items") or []}
+    for it in items:
+        if key(it) in prev and it["source"] != f["rel"]:
+            it["selected"] = prev[key(it)].get("selected", it["selected"])
+    return {"plan_id": db.add_plan(series["id"], scan_id, items)}
 
 
 @handler("replan")

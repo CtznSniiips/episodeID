@@ -421,7 +421,7 @@ async function watchJobs() {
 
 function labelJob(kind) {
   return { scan: "Scan", fetch_refs: "Fetch references", refresh_episodes: "Load TVDB episodes",
-    apply: "Apply changes", undo: "Undo", replan: "Rebuild plan" }[kind] || kind;
+    apply: "Apply changes", undo: "Undo", replan: "Rebuild plan", ai_check: "Ask AI" }[kind] || kind;
 }
 
 function showTab() {
@@ -459,6 +459,7 @@ function segHtml(sg, eps) {
 }
 
 async function tabPlan(reload = true) {
+  if (reload || state.ai === undefined) state.ai = !!(await api("/api/status").catch(() => ({}))).llm;
   const plan = reload || !state.plan ? await api(`/api/series/${state.series.id}/plan`) : state.plan;
   state.plan = plan;
   const tab = $("#tab");
@@ -514,6 +515,7 @@ async function tabPlan(reload = true) {
   }
   $$("button.set-ep", tab).forEach((b) => b.onclick = () => setEpisodeDialog(b.dataset.src, b.dataset.cur));
   $$("button.card-check", tab).forEach((b) => b.onclick = () => cardCheckDialog(b.dataset.src));
+  $$("button.ai-check", tab).forEach((b) => b.onclick = () => { startJob("ai_check", { source: b.dataset.src }); toast("Asking the AI — see the job log; the plan updates when it answers."); });
   $$("button.cut-pick", tab).forEach((b) => b.onclick = () =>
     cutDialog(plan, plan.items.find((x) => String(x.id) === b.dataset.iid)));
   $$("button.clear-ov", tab).forEach((b) => b.onclick = async () => {
@@ -614,6 +616,7 @@ function rowHtml(it, eps, applied) {
     <td>${applied ? "" : `<button class="btn small set-ep" data-src="${esc(it.source)}" data-cur="${esc(cur)}">Set episode…</button>
       ${ovr ? `<button class="btn small clear-ov" data-src="${esc(it.source)}">Clear</button>` : ""}`}
       <button class="btn small card-check" data-src="${esc(it.source)}" style="margin-top:4px" title="See what the title-card OCR reads in part of this file">Check title cards…</button>
+      ${state.ai && !applied && it.kind !== "ok" && it.text_source && it.text_source !== "none" ? `<button class="btn small ai-check" data-src="${esc(it.source)}" style="margin-top:4px" title="Ask the AI which episode this file's dialogue is, from the TVDB summaries of the likely episodes">Ask AI</button>` : ""}
       ${it.kind === "split" && !applied ? `<button class="btn small cut-pick" data-iid="${it.id}" style="margin-top:4px" title="See where this file would be split, with pictures, and choose">Choose cut points…</button>` : ""}</td>
   </tr>`;
 }
