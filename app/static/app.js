@@ -164,6 +164,7 @@ async function renderHome() {
         <div class="name">${esc(s.name)} <span class="muted">${esc(s.year)}</span></div>
         <div class="path muted">${esc(s.path)}</div>
         <div class="small muted">References: ${s.reference_count} / ${s.episode_count} episodes</div>
+        <div class="small" style="margin:4px 0 2px">${titleCardBadge(s)}</div>
         <div class="bar"><div style="width:${pct}%"></div></div>
         <div class="counts">${counts}</div>
         ${fileCheckLine(s.file_check)}${s.file_check && s.file_check.checked_at ? importLine(s.file_check) : ""}
@@ -197,6 +198,21 @@ function fileCheckLine(fc) {
     .filter(Boolean).join(", ");
   return `<div class="small" title="${esc((p.examples || []).join("\n"))}"><span class="badge b-info">⚑ ${what} since the last scan</span>
     <span class="muted">— open the series and Scan files</span></div>`;
+}
+
+// Whether EpisodeID reads title cards for this show, and what its test found.
+function titleCardBadge(s) {
+  const o = s.options || {};
+  const mode = o.title_cards || "auto";
+  const st = o.title_cards_status || {};
+  const w = st.window ? ` — usually ${fmtTime(st.window[0])}–${fmtTime(st.window[1])} into an episode` : "";
+  const test = st.probed ? `found on ${st.hits} of ${st.probed} test files` : "";
+  if (mode === "off") return `<span class="badge" title="Turned off under Series options">Title cards: off</span>`;
+  if (mode === "on") return `<span class="badge b-info" title="Turned on under Series options${esc(test ? " · " + test : "")}${esc(w)}">Title cards: on</span>`;
+  if (!("has_cards" in st)) return `<span class="badge" title="Tested on the first scan">Title cards: not tested yet</span>`;
+  return st.has_cards
+    ? `<span class="badge b-ok" title="${esc(test + w)}">✓ Title cards (${st.hits}/${st.probed})</span>`
+    : `<span class="badge" title="${esc(test)} — not used for this show. Turn them on under Series options if it does show titles.">No title cards (${st.hits}/${st.probed})</span>`;
 }
 
 function seriesCardCounts(s) {
@@ -344,7 +360,7 @@ async function renderSeries(id) {
       <button class="btn" id="b-refs" title="Download reference subtitles/transcripts for episodes that don't have one yet">Fetch references</button>
       <button class="btn primary" id="b-scan">Scan files</button>
     </div>
-    <div class="small muted" style="margin-top:6px">References: ${s.reference_count} / ${s.episode_count} episodes
+    <div class="small muted" style="margin-top:6px">${titleCardBadge(s)} · References: ${s.reference_count} / ${s.episode_count} episodes
       ${s.last_scan ? ` · last scan ${esc(when(s.last_scan.created))}` : ""}</div>
     <div id="job"></div>
     <div class="tabs">
