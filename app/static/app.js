@@ -972,6 +972,35 @@ function confirmApply(plan, items) {
 
 // ----------------------------------------------------------------- episodes
 
+function pasteRefDialog(code, title) {
+  const s = state.series;
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Paste a reference — ${esc(code)} ${esc(title)}</h2>
+      <div class="spacer"></div><button class="btn small" id="pr-x" aria-label="Close">✕</button></div>
+    <p class="muted small">Paste what this episode says: a transcript copied from a web page (speaker names like
+      <span class="mono">MICHAEL:</span> are recognised and left out), or the contents of a subtitle file (.srt / .vtt / .ass —
+      recognised by their timings). Page headings and stage directions in [brackets] or (parentheses) are ignored.
+      It replaces any reference this episode already has.</p>
+    <textarea id="pr-text" style="width:100%;height:45vh;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font:13px/1.4 ui-monospace,monospace" placeholder="Paste here…"></textarea>
+    <div class="row" style="margin-top:12px"><span class="small muted" id="pr-out"></span><div class="spacer"></div>
+      <button class="btn" id="pr-c">Cancel</button><button class="btn primary" id="pr-go" disabled>Save reference</button></div>`, { sticky: true });
+  $("#modal-box").style.width = "min(900px, 100%)";
+  const ta = $("#pr-text", box);
+  const words = () => (ta.value.match(/\S+/g) || []).length;
+  ta.oninput = () => { const n = words(); $("#pr-out", box).textContent = n ? `${n} words` : ""; $("#pr-go", box).disabled = n < 30; };
+  $("#pr-x", box).onclick = closeModal;
+  $("#pr-c", box).onclick = closeModal;
+  $("#pr-go", box).onclick = async () => {
+    $("#pr-go", box).disabled = true;
+    try {
+      const r = await api(`/api/series/${s.id}/references/${code}/text`, { method: "POST", body: { text: ta.value } });
+      closeModal();
+      toast(`Saved as a ${r.format} for ${code} (${r.words} words of dialogue)` + (r.warning ? ` — ${r.warning}` : ""), r.warning ? 8000 : 4000);
+      state.series = await api(`/api/series/${s.id}`); tabEpisodes();
+    } catch (e) { $("#pr-out", box).textContent = e.message; $("#pr-go", box).disabled = false; }
+  };
+  ta.focus();
+}
+
 async function tabEpisodes() {
   const s = state.series;
   const eps = s.episodes || [];
@@ -979,7 +1008,7 @@ async function tabEpisodes() {
   const missing = eps.filter((e) => e.season > 0 && !e.ref).length;
   tab.innerHTML = `<div class="row" style="margin-bottom:10px">
       <span class="muted small">${missing} regular episodes without a reference.
-        Missing ones can be uploaded by hand (.srt, .ass, .vtt or a plain-text transcript).</span>
+        Missing ones can be uploaded (.srt, .ass, .vtt or a plain-text transcript) or pasted in — e.g. a transcript copied from a web page.</span>
       <div class="spacer"></div>
       <button class="btn small" id="retry">Retry not-found episodes</button>
       <button class="btn small" id="reload-eps">Reload TVDB episode list</button></div>
@@ -991,6 +1020,7 @@ async function tabEpisodes() {
         e.miss ? `<span class="badge b-warn">not found</span> <span class="muted small">${esc(e.miss)}</span>` :
         `<span class="muted small">—</span>`}</td>
       <td><label class="btn small">Upload<input type="file" hidden data-code="${esc(e.code)}" accept=".srt,.ass,.ssa,.vtt,.txt"></label>
+        <button class="btn small paste-ref" data-code="${esc(e.code)}" data-title="${esc(e.title || "")}">Paste</button>
         ${e.ref || e.miss ? `<button class="btn small refetch" data-code="${esc(e.code)}">Re-fetch</button>` : ""}</td>
     </tr>`).join("")}</tbody></table>`;
   $("#retry", tab).onclick = () => startJob("fetch_refs", { retry_misses: true });
@@ -1004,6 +1034,7 @@ async function tabEpisodes() {
       state.series = await api(`/api/series/${s.id}`); tabEpisodes();
     } catch (e) { fail(e); }
   });
+  $$("button.paste-ref", tab).forEach((b) => b.onclick = () => pasteRefDialog(b.dataset.code, b.dataset.title));
   $$("button.refetch", tab).forEach((b) => b.onclick = async () => {
     await api(`/api/series/${s.id}/references/${b.dataset.code}`, { method: "DELETE" }).catch(fail);
     startJob("fetch_refs", { codes: [b.dataset.code] });

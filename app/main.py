@@ -647,6 +647,57 @@ async def upload_reference(sid: int, code: str, file: UploadFile = File(...)):
     return {"ok": True}
 
 
+class PastedRef(BaseModel):
+    text: str
+
+
+@app.post("/api/series/{sid}/references/{code}/text")
+def paste_reference(sid: int, code: str, body: PastedRef):
+    """A transcript or subtitle pasted in (from a wiki page, a script site, an .srt
+    opened in an editor…). Saved like an uploaded file; subtitle text is recognised by
+    its timings, anything else is treated as a transcript."""
+    from .references import _load_ref_file
+    s = db.get_series(sid) or _404()
+    if not re.fullmatch(r"S\d{2,3}E\d{2,4}", code):
+        raise HTTPException(400, "Bad episode code")
+    text = body.text.replace("\r\n", "\n").strip()
+    if len(text) < 200:
+        raise HTTPException(400, "That's too short for an episode's dialogue — paste the whole transcript")
+    if re.match(r"(?i)^\ufeff?webvtt", text):
+        ext = ".vtt"
+    elif re.search(r"\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->", text):
+        ext = ".srt"
+    elif re.search(r"(?im)^\[script info\]|^dialogue:\s*\d", text):
+        ext = ".ass"
+    else:
+        ext = ".txt"
+    if ext == ".txt" and text.count("\n") < 20:
+        # Copied from a web page that runs the lines together ("MICHAEL: Hi. DWIGHT: No."):
+        # one line per speaker, so the speaker names can be told from the dialogue.
+        text = re.sub(r"\s+(?=[A-Z][A-Za-z.'’\-]{1,20}(?: [A-Z][A-Za-z.'’\-]{1,20})?\s*(?:\([^)]{0,30}\))?:\s)",
+                      "\n", text)
+    d = manual_dir(s["tvdb_id"])
+    d.mkdir(parents=True, exist_ok=True)
+    new = d / f"{code}{ext}.new"
+    new.write_text(text + "\n", encoding="utf-8")
+    final = d / f"{code}{ext}"
+    tmp = d / f"_check_{code}{ext}"  # not named like an episode: never loaded as one
+    new.replace(tmp)
+    entry = _load_ref_file(tmp)
+    words = len((entry or {}).get("text", "").split())
+    if words < 50:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, "Couldn't find dialogue in that text — paste the transcript or subtitle itself")
+    for old in d.glob(f"{code}*"):
+        old.unlink()
+    tmp.replace(final)
+    kind = {".txt": "transcript", ".srt": "SRT subtitle", ".vtt": "WebVTT subtitle", ".ass": "ASS subtitle"}[ext]
+    from .references import MIN_TRANSCRIPT_WORDS
+    warn = (f"Only {words} words of dialogue — an episode usually has well over {MIN_TRANSCRIPT_WORDS}; "
+            "it may be part of the transcript.") if words < MIN_TRANSCRIPT_WORDS else ""
+    return {"ok": True, "format": kind, "words": words, "warning": warn}
+
+
 @app.delete("/api/series/{sid}/references/{code}")
 def delete_reference(sid: int, code: str):
     s = db.get_series(sid) or _404()
