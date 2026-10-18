@@ -459,7 +459,7 @@ function segHtml(sg, eps) {
     h += ` <span class="small">${esc(e.title)}</span>` + (e.ref ?
       ` <span class="small ${shaky ? "" : "muted"}" style="${shaky ? "color:var(--warn)" : ""}" title="${esc(e.ref_note || "")}">· ref: ${esc(e.ref.split(":")[0])}${shaky ? " ⚠" : ""}</span>` : "");
   }
-  if (sg.why && (sg.confidence !== "high" || sg.evidence === "title+filename"))
+  if (sg.why && sg.evidence !== "release name" && (sg.confidence !== "high" || sg.evidence === "title+filename"))
     h += `<div class="small" style="color:var(--warn)">${esc(sg.why)}</div>`;
   else if (sg.confidence !== "high" && sg.alternatives && sg.alternatives.length)
     h += ` <span class="muted small">(or ${sg.alternatives.slice(0, 2).map((a) => esc(a.code)).join(", ")})</span>`;
@@ -469,6 +469,9 @@ function segHtml(sg, eps) {
       <span class="muted">“${esc(tc.text)}” at ${fmtTime(tc.time)} → ${esc(tc.code)}${tc.partial ? " (partial read)" : ""}${
       sg.dialogue_code && !conflict ? ` (dialogue said ${esc(sg.dialogue_code)})` : ""}</span></div>`;
   }
+  if (sg.evidence === "release name")
+    h += `<div class="small"><span class="badge ${sg.confidence === "high" ? "b-ok" : "b-warn"}">release name</span>
+      <span class="muted">${esc(sg.why || "")}</span></div>`;
   if (sg.llm) h += `<div class="small"><span class="badge b-ai">AI → ${esc(sg.llm.code)} ${Math.round(sg.llm.confidence * 100)}%</span>
     <span class="muted">${esc(sg.llm.reason)}</span></div>`;
   return h + `</span>`;
@@ -623,6 +626,7 @@ function rowHtml(it, eps, applied) {
       <span class="badge ${STATUS_BADGE[it.status] || ""}">${esc(it.status)}</span>
       ${it.ai ? '<span class="badge b-ai">AI</span>' : ""}
       ${it.ref_warning ? '<span class="badge b-warn">check reference</span>' : ""}
+      ${it.elimination ? '<span class="badge b-info" title="Settled by what\'s around it: the other files and episodes of the season">by elimination</span>' : ""}
       ${((state.series.file_check || {}).imports || []).some((x) => (it.sources || [it.source]).includes(x.rel)) ? '<span class="badge b-bad" title="Sonarr imported this file recently and its content doesn\'t match its name">new download</span>' : ""}
       ${(it.sources || [it.source]).map((p) => `<div class="path" style="margin-top:4px">${it.sources ? "+ " : ""}${esc(p)}</div>`).join("")}${targets}
       ${it.kind === "split" && it.cuts ? `<div class="small" style="margin-top:2px"><span class="badge b-info">cut points chosen</span>

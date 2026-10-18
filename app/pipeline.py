@@ -264,6 +264,7 @@ def job_scan(ctx, params):
             if sg.get("why"):
                 ctx.log(f"{'':<16}   {sg['code']}? {sg['why']}")
 
+    _release_name_pass(series, files, ctx)
     _titlecard_pass(series, files, eps, ctx, reread=bool(params.get("reread_cards")))
     _title_card_swaps(files, ctx)
 
@@ -346,6 +347,61 @@ def _discount_unreferenced(segs: list[dict], expected: list[str], duration: floa
         sg.update(confidence="low", no_ref_for=cands[0],
                   why=f"{' / '.join(cands)} (per the filename) has no reference yet, so the "
                       f"dialogue could only match other episodes — {sg['code']} was the closest")
+
+
+def _release_name_pass(series: dict, files: list[dict], ctx) -> None:
+    """Sonarr remembers the release each file was imported from. When that name carries
+    an episode title ("…S04E03.Dunder.Mifflin.Infinity.720p…"), it's evidence of its own:
+    it settles a file the dialogue couldn't, or says which episode it probably is."""
+    from . import sonarr
+    from .references import name_check
+    try:
+        names = sonarr.release_names(series["tvdb_id"])
+    except sonarr.SonarrError as e:
+        ctx.log(f"Sonarr release names: {e}")
+        return
+    if not names:
+        return
+    used = 0
+    for f in files:
+        rel_names = names.get(f["rel"])
+        if not rel_names or f.get("status") == "ERROR":
+            continue
+        exp = f.get("expected") or []
+        checks = [name_check(rel_names, series["episodes"], c, series["name"]) for c in exp] or \
+                 [name_check(rel_names, series["episodes"], "", series["name"])]
+        if exp and all(v == "match" for v, _o, _n in checks):
+            verdict, code, name = "match", None, checks[0][2]
+        else:
+            other = next(((o, n) for v, o, n in checks if v == "other"), None)
+            if not other:
+                continue
+            verdict, code, name = "other", other[0], other[1]
+        f["release"] = {"name": name, "verdict": verdict, "code": code}
+        segs = f.get("segments") or []
+        strong = [sg for sg in segs if sg.get("confidence") in ("high", "manual")]
+        dur = float(f.get("duration") or 0)
+        if verdict == "match":
+            if any(sg.get("code") not in exp for sg in strong) or len(strong) == len(exp):
+                continue  # the dialogue is sure of something else, or already sure of this
+            step = dur / len(exp) if dur else 0
+            f["segments"] = [{"start": round(i * step, 1), "end": round((i + 1) * step, 1), "code": c,
+                              "score": 0, "confidence": "high", "alternatives": [], "evidence": "release name",
+                              "why": f"Sonarr imported it from '{name}', which carries the title"}
+                             for i, c in enumerate(exp)]
+            f["status"], f["note"] = classify(exp, f["segments"], f.get("text_source") or "none")
+            f["note"] = f"confirmed by its release name ({name})"
+            used += 1
+        elif not strong:
+            # Another episode's title in the release name: worth a look, not a rename on its own.
+            f["segments"] = [{"start": 0, "end": dur, "code": code, "score": 0, "confidence": "low",
+                              "alternatives": [], "evidence": "release name",
+                              "why": f"Sonarr imported it from '{name}', which names {code}"}]
+            f["status"], _n = classify(exp, f["segments"], f.get("text_source") or "none")
+            f["note"] = f"its release name ({name}) names {code}"
+            used += 1
+    if used:
+        ctx.log(f"Sonarr release names: {used} file(s) settled or flagged by the release they were imported from.")
 
 
 def _story(eps: dict, code: str) -> list[str]:

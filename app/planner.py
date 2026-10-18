@@ -344,7 +344,7 @@ ACTIONABLE = ("rename", "split", "aside", "join")
 # Bumped when build_plan learns something new (joins, …): a draft plan made by an older
 # version is rebuilt from its scan when it's next shown, so the new kinds of changes
 # appear without a rescan.
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 
 # "… - Part 2", "…, Part II", "… Pt. 3", "… (Part 1)" — the last one in the name.
 _PART = re.compile(r"(?i)(?:\s*[-–,]\s*|\s+|\s*\(\s*)(?:part|pt\.?)\s*(\d{1,2}|[ivx]{1,4}|one|two|three|four|five|six)\b\s*\)?")
@@ -441,6 +441,79 @@ def _join_parts(items, files, decided, eps, root, layout, s, series_name, year) 
     if not joins:
         return items
     return joins + [it for it in items if it["source"] not in used]
+
+
+def _eliminate(items, eps, root, layout, s, series_name, year) -> None:
+    """Files the evidence couldn't settle (review), helped by what's around them:
+      * the only unsettled file in a season, with exactly one aired episode of that
+        season left without a file → that's very likely it: confirmed if its name
+        already says so, otherwise offered as a rename (not ticked);
+      * a file named for an episode no other file has, between neighbours confirmed as
+        named (E05 and E07 correct, this one says E06) → its name stands.
+    Only when nothing it contains points at another episode with confidence."""
+    from datetime import date
+    today = date.today().isoformat()
+
+    def strong_other(it):
+        return any(sg.get("confidence") in ("high", "manual") and sg.get("code") not in (it.get("expected") or [])
+                   for sg in it.get("segments") or [])
+
+    covered = set()
+    for it in items:
+        if it["kind"] == "ok":
+            covered.update(it.get("expected") or [])
+        elif it["kind"] in ("rename", "split"):
+            covered.update(c for t in it.get("targets") or [] if not t.get("duplicate") for c in t.get("codes") or [])
+    named = {}
+    for it in items:
+        for c in it.get("expected") or []:
+            named.setdefault(c, []).append(it)
+    unsettled = [it for it in items if it["kind"] == "review" and len(it.get("expected") or []) <= 1
+                 and not strong_other(it) and not it.get("claimed_by")]
+
+    def season_of(it):
+        if it.get("expected"):
+            return eps.get(it["expected"][0], {}).get("season")
+        m = re.search(r"(?i)season\s*(\d+)", it["source"])
+        return int(m.group(1)) if m else None
+
+    by_season: dict[int, list] = {}
+    for it in unsettled:
+        n = season_of(it)
+        if n is not None:
+            by_season.setdefault(n, []).append(it)
+    for n, its in by_season.items():
+        aired = [c for c, e in eps.items() if e["season"] == n and (not e.get("aired") or e["aired"] <= today)]
+        left = [c for c in aired if c not in covered and not any(o["kind"] != "review" for o in named.get(c, []))]
+        if len(its) != 1 or len(left) != 1:
+            continue
+        it, code = its[0], left[0]
+        why = f"by elimination: the only file in season {n} left unsettled, and {code} is the only aired " \
+              f"episode of season {n} without a file"
+        if code in (it.get("expected") or []):
+            it.update(kind="ok", reason=f"Correct — {why} (as named)", elimination=True)
+            covered.add(code)
+            continue
+        src = root / it["source"]
+        name = episode_filename(series_name, [eps[code]], src.suffix, src.name, s, year)
+        dst = str((season_dir(root, n, s, layout) / name).relative_to(root))
+        it.update(kind="rename", codes=[code], targets=[{"path": dst, "codes": [code]}], selected=False,
+                  elimination=True, reason=f"Probably {code} {eps[code].get('title') or ''} — {why}. Check before applying.")
+        covered.add(code)
+
+    ok_named = {c for it in items if it["kind"] == "ok" for c in it.get("expected") or []}
+    for it in unsettled:
+        if it["kind"] != "review" or len(it.get("expected") or []) != 1:
+            continue
+        code = it["expected"][0]
+        e = eps.get(code)
+        if not e or code in covered or len(named.get(code, [])) > 1:
+            continue
+        prev, nxt = (f"S{e['season']:02d}E{e['episode'] + d:02d}" for d in (-1, 1))
+        if prev in ok_named and nxt in ok_named:
+            it.update(kind="ok", elimination=True,
+                      reason=f"Correct — as named: {prev} and {nxt} either side are confirmed, and no other "
+                             f"file is {code} (the evidence for this file alone wasn't enough)")
 
 
 def build_plan(series: dict, scan: dict) -> list[dict]:
@@ -694,6 +767,9 @@ def build_plan(series: dict, scan: dict) -> list[dict]:
                       targets=[{"path": f"{backup}/unverified/{occ}"}],
                       selected=bool(owner.get("selected")))
             moving.add(occ)
+
+    # 4b. Process of elimination for files nothing settled.
+    _eliminate(items, eps, root, layout, s, series_name, series.get("year"))
 
     # 5. One episode in several files ("… - Part 1.mkv", "… - Part 2.mkv"): offer to join
     #    them into one file, instead of keeping one and moving the rest aside.

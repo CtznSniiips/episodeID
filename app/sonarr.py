@@ -78,6 +78,24 @@ def files_by_path(sonarr_series_id: int) -> dict[str, dict]:
     return out
 
 
+def release_names(tvdb_id: int) -> dict[str, list[str]]:
+    """relative path → the names Sonarr imported the file under: the original release
+    ("The.Office.US.S04E03.Dunder.Mifflin.Infinity.720p…") and the original file name.
+    Empty if Sonarr isn't set up or doesn't have the series."""
+    if not configured():
+        return {}
+    sr = find_series(tvdb_id)
+    if not sr:
+        return {}
+    out = {}
+    for f in _get("episodefile", seriesId=sr["id"]) or []:
+        names = [f.get("sceneName") or "", Path((f.get("originalFilePath") or "").replace("\\", "/")).name]
+        names = [n for n in dict.fromkeys(n.strip() for n in names) if n]
+        if names:
+            out[(f.get("relativePath") or "").replace("\\", "/")] = names
+    return out
+
+
 def compare(series: dict, scan_files: list[dict]) -> dict:
     """Where EpisodeID's picture of the series' files and Sonarr's disagree."""
     sr = find_series(series["tvdb_id"])
