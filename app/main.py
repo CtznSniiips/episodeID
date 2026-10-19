@@ -183,7 +183,10 @@ async def sonarr_webhook(request: Request):
         return {"ignored": f"{rel} isn't in {series['path']}"}
     if db.latest_scan_summary(series["id"]) is None:
         return {"ignored": "this series hasn't been scanned yet — scan it once first"}
-    jobs.submit("fetch_refs", series["id"], {"auto": True})
+    job = db.add_to_waiting_import(series["id"], rel)
+    if job:
+        log.info("Sonarr imported %s / %s — added to waiting scan %s", series["name"], rel, job)
+        return {"queued": job, "series": series["name"], "file": rel, "batched": True}
     job = jobs.submit("scan", series["id"], {"only": [rel], "imported": True})
     log.info("Sonarr imported %s / %s — scanning it (job %s)", series["name"], rel, job)
     return {"queued": job, "series": series["name"], "file": rel}
@@ -835,6 +838,16 @@ def job_get(jid: int, tail: int | None = None):
 def job_cancel(jid: int):
     jobs.cancel(jid)
     return {"ok": True}
+
+
+@app.get("/api/series/{sid}/queue")
+def series_queue(sid: int):
+    return {"waiting": db.count_waiting(sid)}
+
+
+@app.post("/api/series/{sid}/jobs/cancel-waiting")
+def series_cancel_waiting(sid: int):
+    return {"cancelled": db.cancel_waiting(sid)}
 
 
 # --------------------------------------------------------------- scans/plans

@@ -68,12 +68,12 @@ assert c.post("/api/sonarr/webhook", json={"eventType": "Test"}).json()["ok"]
 r = c.post("/api/sonarr/webhook", json={"eventType": "Download", "series": {"tvdbId": 1, "path": "/tv/Show"},
                                        "episodeFile": {"relativePath": new, "path": "/tv/Show/" + new}}).json()
 print(" ", r)
-assert [q[0] for q in queued] == ["fetch_refs", "scan"] and queued[1][2] == {"only": [new], "imported": True}
+assert [q[0] for q in queued] == ["scan"] and queued[0][2] == {"only": [new], "imported": True}
 assert "ignored" in c.post("/api/sonarr/webhook", json={"eventType": "Download", "series": {"tvdbId": 99},
                                                         "episodeFile": {"relativePath": new}}).json()
 assert "ignored" in c.post("/api/sonarr/webhook", json={"eventType": "Grab", "series": {"tvdbId": 1}}).json()
 autocheck.record(db.get_series(sid))
-res = pipeline.job_scan(ctx("scan"), queued[1][2])
+res = pipeline.job_scan(ctx("scan"), queued[0][2])
 print("  import scan:", res["files"])
 assert res["files"][0]["rel"] == new and res["files"][0]["status"] != "OK"
 assert len(db.latest_scan(sid)["results"]["files"]) == 5

@@ -389,13 +389,16 @@ async function watchJobs() {
   const tick = async () => {
     if (!state.series || state.series.id !== sid) return clearInterval(pollTimer);
     const list = await api(`/api/jobs?series_id=${sid}`).catch(() => []);
-    const j = list[0];
+    // Show the job that's working, not the newest one still waiting behind it.
+    const j = list.find(x => x.status === "running") || list[0];
+    const q = await api(`/api/series/${sid}/queue`).catch(() => ({ waiting: 0 }));
+    const waiting = Math.max(0, q.waiting - (j && j.status === "queued" ? 1 : 0));
     const box = $("#job");
     if (!box) return clearInterval(pollTimer);
     if (!j) { box.innerHTML = ""; return; }
     const active = j.status === "queued" || j.status === "running";
     const full = await api(`/api/jobs/${j.id}?tail=300`);
-    const sig = `${j.id}|${j.status}|${full.progress}|${full.message}|${full.log_lines}`;
+    const sig = `${j.id}|${j.status}|${full.progress}|${full.message}|${full.log_lines}|${waiting}`;
     if (sig === lastSig && box.firstChild) { schedule(active); return; }  // nothing new
     lastSig = sig;
     const pct = Math.round((full.progress || 0) * 100);
@@ -404,6 +407,8 @@ async function watchJobs() {
       <div class="row"><b>${esc(labelJob(j.kind))}</b>
         <span class="badge ${badge}">${esc(j.status)}</span>
         <span class="muted small">${esc(full.message || "")}</span><div class="spacer"></div>
+        ${waiting ? `<span class="badge">${waiting} more waiting</span>
+          <button class="btn small" id="cancel-waiting" title="Cancel the jobs queued behind this one">Cancel waiting</button>` : ""}
         ${active ? `<button class="btn small danger" id="cancel-job">Cancel</button>` :
           `<button class="btn small" id="hide-job">Hide</button>`}</div>
       ${active ? `<div class="bar" style="margin-top:8px"><div style="width:${pct}%"></div></div>` : ""}
@@ -414,7 +419,18 @@ async function watchJobs() {
     if (!pinned) pre.scrollTop = scrollPos;
     pre.addEventListener("scroll", () => { scrollPos = pre.scrollTop; });
     const c = $("#cancel-job");
-    if (c) c.onclick = () => api(`/api/jobs/${j.id}/cancel`, { method: "POST" });
+    if (c) c.onclick = async () => {
+      c.disabled = true; c.textContent = "Cancelling…";
+      await api(`/api/jobs/${j.id}/cancel`, { method: "POST" }).catch(fail);
+      lastSig = ""; tick();
+    };
+    const cw = $("#cancel-waiting");
+    if (cw) cw.onclick = async () => {
+      cw.disabled = true;
+      const r = await api(`/api/series/${sid}/jobs/cancel-waiting`, { method: "POST" }).catch(fail);
+      if (r) toast(`Cancelled ${r.cancelled} waiting job${r.cancelled === 1 ? "" : "s"}`);
+      lastSig = ""; tick();
+    };
     const hb = $("#hide-job");
     if (hb) hb.onclick = () => { box.innerHTML = ""; clearInterval(pollTimer); };
     if (wasActive && !active && j.id === lastId) {

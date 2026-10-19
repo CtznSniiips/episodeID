@@ -11,7 +11,7 @@ from . import db, fandom, llm, titlecard, tvdb
 from .config import get_settings
 from .executor import (apply_plan, migrate_legacy_backup, sonarr_rescan, sonarr_series_type_note,
                        undo_apply)
-from .jobs import handler
+from .jobs import Cancelled, handler
 from .matcher import Matcher, classify, parse_filename_episodes
 from .media_text import cached_dialogue, get_dialogue
 from .planner import build_plan, list_videos
@@ -189,6 +189,15 @@ def job_fetch_refs(ctx, params):
 def job_scan(ctx, params):
     s = get_settings()
     series = _ensure_episodes(_series(ctx), ctx, max_age_h=EPISODES_MAX_AGE_H)
+    if params.get("imported"):
+        ctx.log(f"Sonarr imported {len(params['only'])} file(s): fetching any missing references first.")
+        try:
+            job_fetch_refs(ctx, {"auto": True})  # what used to be a separate job per imported file
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 — scan with what there is
+            ctx.log(f"Couldn't fetch references ({e}); scanning with the ones already here.")
+        series = db.get_series(series["id"])
     root = Path(series["path"])
     opts = series.get("options") or {}
     include_specials = bool(opts.get("include_specials"))

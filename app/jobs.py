@@ -67,16 +67,19 @@ def submit(kind: str, series_id: int | None, params: dict | None = None) -> int:
 
 
 def cancel(job_id: int) -> None:
-    _cancel.add(job_id)
+    """A running job stops at its next check; a waiting one is cancelled at once."""
+    if not db.cancel_if_waiting(job_id):
+        _cancel.add(job_id)
 
 
 def _run(job_id: int) -> None:
     job = db.get_job(job_id)
     if job is None:
         return
-    if job_id in _cancel:
-        db.update_job(job_id, status="cancelled", finished=db.now(), message="Cancelled")
-        return
+    if job_id in _cancel or job["status"] != "queued":
+        if job["status"] == "queued":
+            db.update_job(job_id, status="cancelled", finished=db.now(), message="Cancelled")
+        return  # cancelled while it waited
     ctx = JobContext(job_id, job["series_id"])
     db.update_job(job_id, status="running", started=db.now())
     try:

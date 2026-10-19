@@ -287,6 +287,37 @@ def get_job(job_id: int, tail: int | None = None) -> dict | None:
     return job
 
 
+def count_waiting(series_id: int) -> int:
+    return conn().execute("SELECT count(*) FROM jobs WHERE series_id=? AND status='queued'",
+                          (series_id,)).fetchone()[0]
+
+
+def cancel_waiting(series_id: int) -> int:
+    return conn().execute("UPDATE jobs SET status='cancelled', finished=?, message='Cancelled before it started' "
+                          "WHERE series_id=? AND status='queued'", (now(), series_id)).rowcount
+
+
+def cancel_if_waiting(job_id: int) -> bool:
+    return conn().execute("UPDATE jobs SET status='cancelled', finished=?, message='Cancelled before it started' "
+                          "WHERE id=? AND status='queued'", (now(), job_id)).rowcount == 1
+
+
+def add_to_waiting_import(series_id: int, rel: str) -> int | None:
+    """Add a file to an import scan that hasn't started yet (Sonarr importing a whole
+    season sends one webhook per file: they become one scan). Returns its job id."""
+    r = conn().execute("SELECT id, params FROM jobs WHERE series_id=? AND kind='scan' AND status='queued' "
+                       "ORDER BY id DESC LIMIT 1", (series_id,)).fetchone()
+    if not r:
+        return None
+    p = json.loads(r["params"] or "{}")
+    if not p.get("imported"):
+        return None
+    if rel not in p["only"]:
+        p["only"].append(rel)
+    n = conn().execute("UPDATE jobs SET params=? WHERE id=? AND status='queued'", (json.dumps(p), r["id"])).rowcount
+    return r["id"] if n == 1 else None
+
+
 def list_jobs(series_id: int | None = None, limit: int = 30) -> list[dict]:
     q = ("SELECT id, series_id, kind, status, created, started, finished, progress, message "
          "FROM jobs")
@@ -294,7 +325,7 @@ def list_jobs(series_id: int | None = None, limit: int = 30) -> list[dict]:
     if series_id is not None:
         q += " WHERE series_id=?"
         args = (series_id,)
-    q += " ORDER BY id DESC LIMIT ?"
+    q += " ORDER BY status='running' DESC, id DESC LIMIT ?"  # the working job first, however long the queue
     rows = conn().execute(q, args + (limit,)).fetchall()
     return [dict(r) for r in rows]
 
