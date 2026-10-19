@@ -167,11 +167,24 @@ def _ns(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", t)
 
 
+def series_names(series: dict) -> list[str]:
+    """The names the show goes by here: its TVDB name and its folder's name."""
+    return [n for n in (series.get("name"), Path(series.get("path") or "").name) if n]
+
+
 class TitleIndex:
     """Fuzzy lookup of on-screen text against a series' episode titles."""
 
     def __init__(self, episodes: list[dict], include_specials: bool = False,
-                 recurring: dict | None = None):
+                 recurring: dict | None = None, series_names: list[str] | None = None):
+        # The show's own name is on screen in every episode (its logo, "THOMAS & FRIENDS")
+        # and can look like part of a title ("Thomas' Animal Friends"): text made only of
+        # the name's words is the logo, not a title — unless it is exactly a title.
+        self.name_words = {w for n in (series_names or []) for w in
+                           re.findall(r"[a-z0-9]+", html.unescape(n).lower().replace("&", " and "))
+                           if not re.fullmatch(r"(19|20)\d\d", w)}
+        if self.name_words:
+            self.name_words.add("and")
         # Titles that also show up in a series' opening titles (Bluey's intro names
         # "BINGO" ~20 s in): code → seconds into an episode where that text appears.
         # A read of that title near that point is ignored; elsewhere it counts.
@@ -226,6 +239,25 @@ class TitleIndex:
         seg = self._cum[idx, end] - self._cum[idx, start]
         inter = np.minimum(seg, v).sum(axis=1)
         return 2.0 * inter / np.maximum(1, (end - start) + len(c))
+
+    def only_name_words(self, text: str) -> bool:
+        """Is this text nothing but words of the series' name (spaces lost or not)?"""
+        c = _ns(text)
+        if not self.name_words or len(c) < 3:
+            return False
+        ok = [True] + [False] * len(c)
+        for i in range(len(c)):
+            if ok[i]:
+                for w in self.name_words:
+                    if c.startswith(w, i):
+                        ok[i + len(w)] = True
+        return ok[len(c)]
+
+    def _logo(self, r: dict | None, pieces: list[str]) -> bool:
+        """A read that is only the show's logo: every piece of text it was made from is
+        the series' name words, and it isn't an exact title (which can still count)."""
+        return bool(r) and all(self.only_name_words(p) for p in pieces) and \
+            (r.get("gapped") or r.get("tail") or r["score"] < 0.97)
 
     def read(self, text: str) -> dict | None:
         """What this on-screen text says about the episode (see _read). The same text
@@ -375,10 +407,11 @@ class TitleIndex:
                     dedup = [w for k, w in enumerate(words) if k == 0 or w.lower() != words[k - 1].lower()]
                     if len(dedup) < len(words):
                         cands.append(" ".join(dedup))
-        reads = [r for r in (self.not_recurring(self.read(c), at) for c in dict.fromkeys(cands)) if r]
+        reads = [r for r in (self.not_recurring(self.read(c), at) for c in dict.fromkeys(cands))
+                 if r and not self._logo(r, [c for c in [r["text"]]])]
         if not any(not r["partial"] for r in reads) and len(big) >= 2:
             g = self.not_recurring(self._gapped(big), at)
-            if g:
+            if g and not self._logo(g, g["text"].split(" … ")):
                 reads.append(g)
         if not reads:
             return None
@@ -770,10 +803,12 @@ def detect(video: Path, duration: float, segments: list[dict], index: TitleIndex
 
 def _one_per_stretch(cards: list[dict], expected) -> list[dict]:
     """Keep the most convincing card in each 2-minute stretch: one that fits the
-    filename, then a complete read, then the longer title (a title beats a name in an
+    filename, then a complete read, then one read as written (not pieced together
+    from two bits of text or just a title's ending), then the longer title (a title beats a name in an
     intro roll call), then the one seen on more frames. Episodes in one file are
     further apart than that."""
     rank = lambda c: (_fits(c, expected) if expected else False, not c["partial"],  # noqa: E731
+                      not (c.get("gapped") or c.get("tail")),  # read as written beats pieced together
                       len(_ns(c["text"])), c.get("frames", 1))
     kept: list[dict] = []
     for c in sorted(cards, key=rank, reverse=True):

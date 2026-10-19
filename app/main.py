@@ -806,7 +806,7 @@ def titlecard_check(sid: int, body: CardCheckReq):
     opts = series.get("options") or {}
     rec = (opts.get("title_cards_status") or {}).get("recurring")
     index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")),
-                                 rec if isinstance(rec, dict) else None)
+                                 rec if isinstance(rec, dict) else None, titlecard.series_names(series))
     try:
         return titlecard.inspect(video, start, length, index, "cpu" if body.decode == "cpu" else "auto",
                                  "key" if body.mode == "key" else "full")

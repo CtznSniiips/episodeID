@@ -766,7 +766,8 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
     status0 = dict(opts.get("title_cards_status") or {})
     rec0 = status0.get("recurring")
     recurring: dict = dict(rec0) if isinstance(rec0, dict) and not reread else {}
-    index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")), recurring)
+    index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")), recurring,
+                                 titlecard.series_names(series))
     runtimes = sorted(e["runtime"] for e in eps.values() if e.get("runtime") and e["season"] > 0)
     runtime = runtimes[len(runtimes) // 2] if runtimes else None
     # How long one episode runs in these files, from the files named as two or more
@@ -874,7 +875,7 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             for code, (med, _n, _t) in new.items():
                 recurring[code] = med
             index = titlecard.TitleIndex(series["episodes"], bool(opts.get("include_specials")),
-                                         recurring)
+                                         recurring, titlecard.series_names(series))
             status.pop("window", None)  # learned from the opening titles' position
             for code, (med, n_files, txt) in sorted(new.items()):
                 ctx.log(f"Title cards: '{txt}' shows in {n_files} of {len(sample)} files about "
