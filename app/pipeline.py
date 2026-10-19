@@ -941,8 +941,8 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
         ctx.check_cancel()
         ctx.progress(n / len(todo), f"Title cards: {Path(f['rel']).name}")
         cards = run(f, learn())
-        if not cards and use_vision:
-            cards = _vision_card(root / f["rel"], f, index, series["name"], ctx)
+        if use_vision:
+            cards = _vision_check(root / f["rel"], f, cards, index, series["name"], ctx)
         report(f, cards, _apply_title_cards(f, cards, rt, trust))
     if titlecard._accel.get("ocr_gpu_error") and not titlecard._accel.get("gpu_error_logged"):
         titlecard._accel["gpu_error_logged"] = True
@@ -956,21 +956,57 @@ def _titlecard_pass(series: dict, files: list[dict], eps: dict, ctx, reread: boo
             db.update_series(series["id"], options=opts)
 
 
-def _vision_card(video: Path, f: dict, index, series_name: str, ctx) -> list[dict]:
-    full = float(get_settings()["titlecard_scan_seconds"])
-    dur = float(f.get("duration") or 0)
-    frames = titlecard.vision_frames(video, 0.0, min(full, max(10.0, dur)))
+def _vision_reason(f: dict, cards: list[dict], first_end: float) -> tuple[str | None, dict | None]:
+    """Why the first episode's title card should go to the vision model, if it should:
+    OCR read no card, only part of one, or a card that contradicts both the filename
+    and the dialogue (the show's logo looking like a title…). Returns (reason, card)."""
+    first = [c for c in cards if c["time"] < first_end]
+    if not first:
+        return "OCR read no title card", None
+    full = [c for c in first if not c.get("partial")]
+    if not full:
+        return "OCR only read part of a title", None
+    said = set(f.get("expected") or []) | {sg["code"] for sg in f.get("segments") or [] if sg.get("code")}
+    if said and not any(c["code"] in said for c in full):
+        c = max(full, key=lambda c: c.get("frames", 1))
+        return f"OCR's card ({c['code']}) disagrees with both the filename and the dialogue", c
+    return None, None
+
+
+def _vision_check(video: Path, f: dict, cards: list[dict], index, series_name: str, ctx) -> list[dict]:
+    """Ask the vision model about the first episode's card when OCR couldn't settle it.
+    Its answer replaces OCR's read of that card only when it reads a whole title."""
+    full_len = float(get_settings()["titlecard_scan_seconds"])
+    reason, doubted = _vision_reason(f, cards, full_len)
+    if not reason:
+        return cards
+    name = Path(f["rel"]).name
+    windows = [w for w in f.get("title_scan") or [] if w[0] < full_len]
+    frames = titlecard.vision_frames(video, windows)
     if not frames:
-        return []
+        ctx.log(f"  vision: {name} — {reason}, but no frame shows large text to send.")
+        return cards
     try:
         text = llm.read_title_card([b for _, b in frames], series_name)
     except Exception as e:  # noqa: BLE001
-        ctx.log(f"  vision model error: {e}")
-        return []
+        ctx.log(f"  vision: {name} — model error: {e}")
+        return cards
     r = index.read(text) if text else None
-    if not r:
-        return []
-    return [{**r, "text": f"{text} (vision)", "time": frames[0][0], "frames": 1}]
+    times = ", ".join(_fmt_t(t) for t, _ in frames)
+    if not text:
+        ctx.log(f"  vision: {name} — {reason}; the model saw no episode title (frames at {times}).")
+        return cards
+    if not r or r.get("partial"):
+        ctx.log(f"  vision: {name} — {reason}; the model read '{text}', which "
+                + ("fits several titles" if r else "matches no episode title") + " — not used.")
+        return cards
+    if doubted and r["code"] == doubted["code"]:
+        ctx.log(f"  vision: {name} — {reason}; the model also reads '{text}' → {r['code']}: keeping it.")
+        return cards
+    ctx.log(f"  vision: {name} — {reason}; the model read '{text}' → {r['code']}.")
+    card = {**r, "text": f"{text} (vision)", "time": frames[0][0], "frames": 1, "vision": True}
+    keep = [c for c in cards if c["time"] >= full_len]  # later episodes' cards in the file
+    return sorted([card] + keep, key=lambda c: c["time"])
 
 
 def _llm_pass(series, files, eps, refs, ctx):

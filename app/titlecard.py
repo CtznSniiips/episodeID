@@ -817,26 +817,38 @@ def _one_per_stretch(cards: list[dict], expected) -> list[dict]:
     return sorted(kept, key=lambda c: c["time"])
 
 
-def vision_frames(video: Path, start: float, length: float,
-                  k: int = 4) -> list[tuple[float, bytes]]:
-    """JPEGs of the frames with the most large text — for a vision model to read."""
+def vision_frames(video: Path, windows: list, k: int = 4) -> list[tuple[float, bytes]]:
+    """JPEGs of the frames with the most large text in the windows OCR read
+    ([[start, end], …] as logged) — for a vision model to read."""
     import cv2
     fps = float(get_settings()["titlecard_fps"])
-    cache = _cache_path(video, start, length, fps)
-    if not cache.exists():
-        return []
-    frames = json.loads(cache.read_text())["frames"]
-    scored = sorted(((sum(l[2] for l in fr["lines"] if l[2] >= MIN_BOX_FRAC / 2), fr["t"])
-                     for fr in frames), reverse=True)
-    out = []
-    for area, t in scored[:k]:
-        if area <= 0:
+    seen: dict[float, float] = {}
+    for a, b in windows:
+        for length in (b - a, b - a - 1, b - a + 1):  # the log rounds start and end separately
+            cache = _cache_path(video, a, length, fps)
+            if cache.exists():
+                try:
+                    frames = json.loads(cache.read_text())["frames"]
+                except (OSError, ValueError, KeyError):
+                    continue
+                for fr in frames:
+                    area = sum(l[2] for l in fr["lines"] if l[2] >= MIN_BOX_FRAC / 2)
+                    if area > 0:
+                        seen[fr["t"]] = max(seen.get(fr["t"], 0.0), area)
+                break
+    # The biggest text, but not four frames of the same second of animation.
+    out, picked = [], []
+    for t, _area in sorted(seen.items(), key=lambda x: -x[1]):
+        if len(picked) >= k:
             break
+        if any(abs(t - p) < 2 for p in picked):
+            continue
         got = _sample(video, t, 1.0 / fps, fps)
         if got:
             ok, buf = cv2.imencode(".jpg", got[0][1], [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 out.append((t, buf.tobytes()))
+                picked.append(t)
     return out
 
 
