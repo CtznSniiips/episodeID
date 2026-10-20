@@ -123,7 +123,14 @@ async function route() {
     ((h === "#/" || h.startsWith("#/series")) && a.dataset.nav === "series")));
   try {
     if (h.startsWith("#/settings")) await renderSettings();
-    else if (h.startsWith("#/series/")) await renderSeries(+h.split("/")[2]);
+    else if (h.startsWith("#/series/")) {
+      if (h.split("/")[3] === "backup") state.tab = "options";
+      await renderSeries(+h.split("/")[2]);
+      if (h.split("/")[3] === "backup") {
+        // after the tab has laid out (its backup table loads a moment later)
+        setTimeout(() => { const fs = $("#bk"); if (fs) fs.closest("fieldset").scrollIntoView({ block: "start" }); }, 300);
+      }
+    }
     else await renderHome();
   } catch (e) {
     view.innerHTML = `<div class="card">⚠ ${esc(e.message)}</div>`;
@@ -168,6 +175,7 @@ async function renderHome() {
         <div class="bar"><div style="width:${pct}%"></div></div>
         <div class="counts">${counts}</div>
         ${fileCheckLine(s.file_check)}${s.file_check && s.file_check.checked_at ? importLine(s.file_check) : ""}
+        ${backupLine(s)}
         ${s.active_job ? `<div class="small"><span class="badge b-info">${esc(s.active_job.kind)} running…</span></div>` : ""}
       </div>`;
     }).join("") + `</div>`;
@@ -176,11 +184,21 @@ async function renderHome() {
   $("#add").onclick = () => addSeriesDialog();
   $("#unmon-all").onclick = () => unmonitorAllDialog();
   $$(".series-card").forEach((c) => c.onclick = () => location.hash = `#/series/${c.dataset.id}`);
+  $$(".bk-link").forEach((b) => b.onclick = (e) => { e.stopPropagation(); location.hash = `#/series/${b.dataset.id}/backup`; });
 }
 
 function ago(iso) {
   const h = (Date.now() - new Date(iso).getTime()) / 3600e3;
   return h < 1 ? "under an hour ago" : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} days ago`;
+}
+
+// Video files EpisodeID moved to the series' backup folder (duplicates, originals of
+// splits, files set aside…): there until someone deletes them.
+function backupLine(s) {
+  const b = s.backup;
+  if (!b || !b.videos) return "";
+  return `<div class="small"><span class="badge b-warn bk-link" data-id="${s.id}" style="cursor:pointer"
+    title="Open the backup folder (Series options) to review or delete them">🗄 ${b.videos} backed-up video${b.videos === 1 ? "" : "s"} · ${fmtBytes(b.bytes)}</span></div>`;
 }
 
 function importLine(fc) {

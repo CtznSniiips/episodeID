@@ -540,6 +540,11 @@ def _series_out(s: dict, full: bool = False) -> dict:
     root = Path(s["path"])
     flagged = [x for x in ac.get("imports") or [] if not x.get("ok") and (root / x["rel"]).exists()]
     out["file_check"] = {"checked_at": ac.get("checked_at"), "pending": pend, "imports": flagged}
+    from .executor import backup_videos
+    try:
+        out["backup"] = backup_videos(s)
+    except OSError:
+        out["backup"] = None
     if full:
         misses = _load_misses(s["tvdb_id"])
         out["episodes"] = [{

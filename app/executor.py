@@ -633,6 +633,26 @@ def mark_backup_folder(series_path: str | Path) -> Path | None:
     return top
 
 
+def backup_videos(series: dict) -> dict:
+    """Video files in the series' backup folder (for the series card): count and size.
+    Read-only — doesn't move a legacy backup folder like backup_summary does."""
+    from .media_text import VIDEO_EXTS
+    n = size = 0
+    try:
+        d = backup_dir(series)
+    except ValueError:
+        return {"videos": 0, "bytes": 0}
+    if d.is_dir():
+        for f in _walk_files(d):
+            if f.suffix.lower() in VIDEO_EXTS:
+                n += 1
+                try:
+                    size += 0 if f.is_symlink() else f.stat().st_size
+                except OSError:
+                    pass
+    return {"videos": n, "bytes": size}
+
+
 def backup_summary(series: dict) -> dict:
     migrate_legacy_backup(series)
     d = backup_dir(series)
