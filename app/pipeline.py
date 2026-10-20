@@ -612,8 +612,28 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None,
                 sg["end"] = round(cut, 1)
                 segs.insert(idx + 1, piece)
                 idx, sg = idx + 1, piece
-            sg["title_card"] = c
             old = sg["code"]
+            # The card shows the title of a story TVDB splits into parts ("Diesel's Ghostly
+            # Christmas" for "… (1)" and "… (2)"), the filename names those parts, and the
+            # dialogue matched one part right across where the filename puts them all: one
+            # reference holds the whole story. The card confirms the filename's parts.
+            story = [e for e in expected if e in (c.get("candidates") or [])] if c.get("partial") else []
+            if (len(story) >= 2 and old in story and sg.get("confidence") in ("high", "low")
+                    and len({_expected_at(expected, t, dur) for t in (sg["start"] + 1, sg["end"] - 1)}
+                            & set(story)) >= 2):
+                a, step = float(sg["start"]), (float(sg["end"]) - float(sg["start"])) / len(story)
+                why = (f"the title card reads the story's title ('{c['text']}'), the filename names its "
+                       f"parts {', '.join(story)}, and the dialogue matched {old} right across them — one "
+                       "reference likely holds the whole story, so it can't tell the parts apart")
+                segs[idx:idx + 1] = [{**sg, "code": e, "start": round(a + i * step, 1),
+                                      "end": round(a + (i + 1) * step, 1), "confidence": "high",
+                                      "evidence": "title+filename", "dialogue_code": old, "story": story,
+                                      "title_card": {**c, "code": e}, "why": why}
+                                     for i, e in enumerate(story)]
+                confirmed |= set(story)
+                notes.append(f"title card '{c['text']}' names the story; confirms {', '.join(story)} (filename)")
+                continue
+            sg["title_card"] = c
             alts = {a["code"] for a in sg.get("alternatives") or []}
             if c["code"] in expected:
                 confirmed.add(c["code"])

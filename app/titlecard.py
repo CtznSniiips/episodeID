@@ -167,6 +167,19 @@ def _ns(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", t)
 
 
+_PART_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+               "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6}
+_CARD_PART = re.compile(r"(?i)(?<![a-z])(?:part|pt\.?)\s*(\d{1,2}|one|two|three|four|five|six|iii|ii|iv|vi|i|v)(?![a-z0-9])")
+_TITLE_PART = re.compile(r"(?i)(?:\((\d{1,2})\)|(?:part|pt\.?)\s*(\d{1,2}|one|two|three|four|five|six|iii|ii|iv|vi|i|v))\s*$")
+
+
+def _part_no(m) -> int | None:
+    if not m:
+        return None
+    raw = next(g for g in m.groups() if g).lower()
+    return int(raw) if raw.isdigit() else _PART_WORDS.get(raw)
+
+
 def series_names(series: dict) -> list[str]:
     """The names the show goes by here: its TVDB name and its folder's name."""
     return [n for n in (series.get("name"), Path(series.get("path") or "").name) if n]
@@ -191,6 +204,7 @@ class TitleIndex:
         self.recurring = {k: float(v) for k, v in (recurring or {}).items()} \
             if isinstance(recurring, dict) else {}
         self.titles: list[dict] = []
+        self.part: dict[str, int] = {}  # code → part number in its title ("… (2)", "… Part 2")
         for e in episodes:
             if e["season"] == 0 and not include_specials:
                 continue
@@ -199,6 +213,9 @@ class TitleIndex:
             if len(n) < 2 or re.fullmatch(r"episode \d+", n):
                 continue
             code = f"S{e['season']:02d}E{e['episode']:02d}"
+            pn = _part_no(_TITLE_PART.search(title.strip()))
+            if pn:
+                self.part[code] = pn
             forms = [_ns(title), n.replace(" ", "")]  # with and without a leading "The"/"A"
             # "Cat Pack/PAW Patrol Rescue: Saving the Safe" — cards often show the banner
             # small, shortened or not at all, so the part after the colon also counts.
@@ -417,7 +434,30 @@ class TitleIndex:
             return None
         # Prefer complete reads, then the most specific (longest) text.
         reads.sort(key=lambda r: (not r["partial"], len(_ns(r["text"])), r["score"]), reverse=True)
-        return reads[0]
+        return self._with_part(reads[0], lines)
+
+    def _with_part(self, r: dict, lines: list[list]) -> dict:
+        """A story TVDB splits into parts has one title for all of them ("Diesel's Ghostly
+        Christmas (1)" and "(2)"), so the title alone fits every part. A part marker on
+        the same card ("Part Two", "PART 2") says which."""
+        if not r.get("partial") or not self.part:
+            return r
+        cands = r.get("candidates") or []
+        if not any(c in self.part for c in cands):
+            return r
+        for l in lines:
+            if l[1] < MIN_CONF:
+                continue
+            n = _part_no(_CARD_PART.search(l[0]))
+            if not n:
+                continue
+            hit = [c for c in cands if self.part.get(c) == n]
+            if len(hit) == 1:
+                t = next(t for t in self.titles if t["code"] == hit[0])
+                text = r["text"] if l[0] in r["text"] else f"{r['text']} … {l[0]}"
+                return {"code": hit[0], "title": t["title"], "text": text,
+                        "score": r["score"], "partial": False, "part": n}
+        return r
 
 
     def _gapped(self, big: list[list]) -> dict | None:
