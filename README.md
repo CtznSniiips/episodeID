@@ -11,8 +11,6 @@ Works out which episode each video file **really** contains by reading its dialo
 
 ## Screenshots
 
-*(Invented shows and episodes.)*
-
 **Series** — each show's state at a glance: files correct or to change, title cards, references, new files since the last scan, backed-up videos.
 
 <picture>
