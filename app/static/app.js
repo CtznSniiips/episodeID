@@ -252,7 +252,7 @@ function seriesCardCounts(s) {
 
 async function addSeriesDialog() {
   const box = modal(`<h2 style="margin-top:0">Add series</h2>
-    <input type="search" id="q" placeholder="Search your library, e.g. gumball" class="grow-input" style="width:100%" autocomplete="off">
+    <input type="search" id="q" placeholder="Search your library, e.g. lighthouse" class="grow-input" style="width:100%" autocomplete="off">
     <div id="results" style="margin-top:10px"></div>
     <div id="step2"></div>
     <div class="row" style="margin-top:12px"><a id="browse" style="cursor:pointer" class="small">Browse folders instead…</a>
@@ -1212,11 +1212,11 @@ async function tabOptions() {
     <fieldset><legend>Fandom wiki transcripts</legend>
     <div class="row" style="margin-bottom:6px"><div class="small" style="flex:1">${wikiStatus(o)}</div>
       <button class="btn small" type="button" id="find-wiki">Find automatically</button></div>
-    ${field("fandom_wiki", "Wiki", o.fandom_wiki || "", "Found automatically when the series is added. Subdomain, host or any URL on the wiki — e.g. theamazingworldofgumball or https://pawpatrol.fandom.com/wiki/…. Checked before OpenSubtitles; costs no download quota.")}
+    ${field("fandom_wiki", "Wiki", o.fandom_wiki || "", "Found automatically when the series is added. Subdomain, host or any URL on the wiki — e.g. myshow or https://myshow.fandom.com/wiki/…. Checked before OpenSubtitles; costs no download quota.")}
     ${field("fandom_page_pattern", "Transcript page", o.fandom_page_pattern || "{title}/Transcript", "Only used for episodes not matched to a page automatically. Use {title}, {season}, {episode}.")}
     <div class="field"><label>Page title overrides</label>
       <textarea name="fandom_title_overrides" rows="4" class="mono" placeholder='{"S01E01": "The DVD/Transcript"}'>${esc(o.fandom_title_overrides ? JSON.stringify(o.fandom_title_overrides, null, 1) : "")}</textarea>
-      <div class="hint">JSON object: episode code → wiki page title or URL, e.g. {"S01E03": "https://pawpatrol.fandom.com/wiki/Pups_Save_the_Sea_Turtles/Transcript"}. Underscores and full URLs are fine.</div></div>
+      <div class="hint">JSON object: episode code → wiki page title or URL, e.g. {"S01E03": "https://myshow.fandom.com/wiki/The_Lost_Kite/Transcript"}. Underscores and full URLs are fine.</div></div>
     </fieldset>
     <fieldset><legend>Backup folder</legend>
       <div class="hint" style="margin-bottom:8px">Files EpisodeID moved out of the way (duplicates, unverified files,
