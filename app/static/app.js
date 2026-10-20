@@ -1055,12 +1055,57 @@ function pasteRefDialog(code, title) {
   ta.focus();
 }
 
+// References that hold each other's episode: title cards confirmed both files' names,
+// but each file's dialogue matched the other's reference.
+function refSwapsBox(s) {
+  const sw = s.ref_swaps || [];
+  if (!sw.length) return "";
+  const title = (c) => ((s.episodes || []).find((e) => e.code === c) || {}).title || "";
+  return `<div class="card" style="margin-bottom:12px;border-color:var(--warn)">
+    <b>⚠ ${sw.length === 1 ? "Two references look" : `${sw.length} pairs of references look`} swapped</b>
+    <div class="muted small" style="margin:4px 0 8px">Title cards confirm each file's name, but each file's dialogue
+      matched the other episode's reference — the references hold each other's dialogue (often IMDb numbering a pair
+      the other way round).</div>
+    ${sw.map((p) => `<div class="row" style="gap:8px;margin-top:6px">
+      <span class="mono">${esc(p.codes[0])}</span> ${esc(title(p.codes[0]))} <span class="muted">⇄</span>
+      <span class="mono">${esc(p.codes[1])}</span> ${esc(title(p.codes[1]))}
+      <span class="muted small" title="${esc(p.files.join("\n"))}">(${esc(p.files.map((f) => f.split("/").pop()).join(", "))})</span>
+      <div class="spacer"></div><button class="btn small primary ref-swap" data-codes="${esc(p.codes.join(","))}">Swap references</button></div>`).join("")}
+  </div>`;
+}
+
+// References per season: which seasons have gaps, with a fetch for just that season.
+function seasonCoverage(s) {
+  const today = new Date().toISOString().slice(0, 10);
+  const by = new Map();
+  for (const e of s.episodes || []) {
+    if (e.season === 0 && !(s.options || {}).include_specials) continue;
+    const r = by.get(e.season) || { n: 0, have: 0, unaired: 0, notFound: 0 };
+    if (e.aired && e.aired > today) r.unaired++;
+    else { r.n++; if (e.ref) r.have++; else if (e.miss) r.notFound++; }
+    by.set(e.season, r);
+  }
+  if (!by.size) return "";
+  const rows = [...by.entries()].sort((a, b) => a[0] - b[0]).map(([sn, r]) => {
+    const pct = r.n ? Math.round(100 * r.have / r.n) : 0;
+    const gap = r.n - r.have;
+    const cls = !r.n ? "" : gap === 0 ? "b-ok" : pct >= 50 ? "b-warn" : "b-bad";
+    return `<tr><td>${sn === 0 ? "Specials" : `Season ${sn}`}</td>
+      <td style="width:40%"><div class="bar" title="${pct}%"><div style="width:${pct}%"></div></div></td>
+      <td>${r.n ? `<span class="badge ${cls}">${r.have} / ${r.n}</span>` : `<span class="muted small">nothing aired yet</span>`}${r.notFound ? ` <span class="muted small">${r.notFound} not found</span>` : ""}${r.unaired && r.n ? ` <span class="muted small">+${r.unaired} not aired</span>` : ""}</td>
+      <td style="text-align:right">${gap ? `<button class="btn small season-fetch" data-season="${sn}" title="Fetch references for this season's ${gap} episode${gap === 1 ? "" : "s"} without one (tries not-found ones again)">Fetch missing (${gap})</button>` : ""}</td></tr>`;
+  }).join("");
+  return `<details class="card" style="margin-bottom:12px" ${[...by.values()].some((r) => r.have < r.n) ? "open" : ""}>
+    <summary><b>References by season</b></summary>
+    <table style="margin-top:8px"><thead><tr><th>Season</th><th></th><th>References</th><th></th></tr></thead><tbody>${rows}</tbody></table></details>`;
+}
+
 async function tabEpisodes() {
   const s = state.series;
   const eps = s.episodes || [];
   const tab = $("#tab");
   const missing = eps.filter((e) => e.season > 0 && !e.ref).length;
-  tab.innerHTML = `<div class="row" style="margin-bottom:10px">
+  tab.innerHTML = `${refSwapsBox(s)}${seasonCoverage(s)}<div class="row" style="margin-bottom:10px">
       <span class="muted small">${missing} regular episodes without a reference.
         Missing ones can be uploaded (.srt, .ass, .vtt or a plain-text transcript) or pasted in — e.g. a transcript copied from a web page.</span>
       <div class="spacer"></div>
@@ -1078,6 +1123,21 @@ async function tabEpisodes() {
         ${e.ref || e.miss ? `<button class="btn small refetch" data-code="${esc(e.code)}">Re-fetch</button>` : ""}</td>
     </tr>`).join("")}</tbody></table>`;
   $("#retry", tab).onclick = () => startJob("fetch_refs", { retry_misses: true });
+  $$("button.season-fetch", tab).forEach((b) => b.onclick = () => {
+    startJob("fetch_refs", { season: +b.dataset.season });
+    toast(`Fetching missing references for season ${b.dataset.season} — see the job log.`);
+  });
+  $$("button.ref-swap", tab).forEach((b) => b.onclick = async () => {
+    const [x, y] = b.dataset.codes.split(",");
+    if (!confirm(`Swap the references for ${x} and ${y}, then rescan?\n\nThe rescan reuses the cached dialogue and title cards, so it's quick.`)) return;
+    b.disabled = true;
+    try {
+      await api(`/api/series/${s.id}/swap-references`, { method: "POST", body: { codes: [x, y] } });
+      toast(`Swapped the references for ${x} and ${y} — rescanning`);
+      state.series = await api(`/api/series/${s.id}`); tabEpisodes();
+      startJob("scan");
+    } catch (e) { fail(e); b.disabled = false; }
+  });
   $("#reload-eps", tab).onclick = () => startJob("refresh_episodes");
   $$("input[type=file]", tab).forEach((inp) => inp.onchange = async () => {
     const fd = new FormData();

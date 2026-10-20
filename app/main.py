@@ -546,6 +546,11 @@ def _series_out(s: dict, full: bool = False) -> dict:
     except OSError:
         out["backup"] = None
     if full:
+        from .pipeline import reference_swaps
+        last = db.latest_scan(s["id"]) if scan else None
+        from .references import load_swapped
+        out["ref_swaps"] = reference_swaps((last or {}).get("results", {}).get("files") or [], refs,
+                                           load_swapped(s["tvdb_id"]), (last or {}).get("created"))
         misses = _load_misses(s["tvdb_id"])
         out["episodes"] = [{
             **e, "code": ep_code(e["season"], e["episode"]),
@@ -558,6 +563,13 @@ def _series_out(s: dict, full: bool = False) -> dict:
 
 
 def _ref_note(ref: dict | None, code: str = "", title: str | None = None) -> str:
+    n = _ref_note_inner(ref, code, title)
+    if ref and ref.get("swapped_from") and "swapped" not in n:
+        n = (n + " · " if n else "") + f"swapped from {ref['swapped_from']}"
+    return n
+
+
+def _ref_note_inner(ref: dict | None, code: str = "", title: str | None = None) -> str:
     if not ref:
         return ""
     if ref.get("source") == "opensubtitles":
@@ -843,6 +855,23 @@ def job_get(jid: int, tail: int | None = None):
 def job_cancel(jid: int):
     jobs.cancel(jid)
     return {"ok": True}
+
+
+class SwapRefs(BaseModel):
+    codes: list[str]
+
+
+@app.post("/api/series/{sid}/swap-references")
+def references_swap(sid: int, body: SwapRefs):
+    from .references import swap_references
+    s = db.get_series(sid) or _404()
+    a, b = (body.codes + ["", ""])[:2]
+    known = {ep_code(e["season"], e["episode"]) for e in s["episodes"]}
+    if len(body.codes) != 2 or a == b or a not in known or b not in known:
+        raise HTTPException(400, "Give two different episodes of this series")
+    n = swap_references(s["tvdb_id"], a, b)
+    log.info("%s: swapped the references for %s and %s (%d files)", s["name"], a, b, n)
+    return {"swapped": n}
 
 
 @app.get("/api/series/{sid}/queue")

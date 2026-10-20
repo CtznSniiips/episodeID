@@ -174,15 +174,29 @@ def job_fetch_refs(ctx, params):
     # Episodes that just gained a transcript page deserve another try even if they were
     # recorded as "not found" earlier.
     retry = [c for c in after if before.get(c) != after[c]]
+    only = None
+    if params.get("season") is not None:
+        # "Fetch missing" for one season: its aired episodes without a reference,
+        # including ones recorded as "not found" before (asked for, so try again).
+        sn, have = int(params["season"]), load_refs(series["tvdb_id"])
+        only = [ep_code(e["season"], e["episode"]) for e in series["episodes"]
+                if e["season"] == sn and _aired(e) and ep_code(e["season"], e["episode"]) not in have]
+        ctx.log(f"Season {sn}: fetching references for {len(only)} episode(s) without one.")
+        retry += only
     ctx.status("Fetching references")
     result = refresh_references(series, ctx, force_codes=params.get("codes"),
                                 retry_misses=bool(params.get("retry_misses")),
-                                retry_codes=retry)
+                                retry_codes=retry, only_codes=only)
     ctx.status("Cross-checking flagged OpenSubtitles references")
     result["names"] = check_release_names(db.get_series(series["id"]), ctx)
     result["verification"] = verify_flagged(db.get_series(series["id"]), ctx)
     db.update_series(series["id"], episodes=series["episodes"])  # cached IMDb ids
     return result
+
+
+def _aired(e: dict) -> bool:
+    """Aired already (or no date known)."""
+    return not e.get("aired") or e["aired"] <= datetime.now(timezone.utc).date().isoformat()
 
 
 @handler("scan")
@@ -276,6 +290,10 @@ def job_scan(ctx, params):
     _release_name_pass(series, files, ctx)
     _titlecard_pass(series, files, eps, ctx, reread=bool(params.get("reread_cards")))
     _title_card_swaps(files, ctx)
+    for sw in reference_swaps(files, refs):
+        ctx.log(f"References for {sw['codes'][0]} and {sw['codes'][1]} look swapped: title cards confirm each "
+                f"file's name, but each file's dialogue matched the other's reference ({sw['files'][0]}, "
+                f"{sw['files'][1]}). Swap them under Episodes & references.")
 
     if llm.available():
         _llm_pass(series, files, eps, refs, ctx)
@@ -728,6 +746,28 @@ def _apply_title_cards(f: dict, cards: list[dict], runtimes: dict | None = None,
         note = "; ".join(notes)
     f["note"] = note
     return notes
+
+
+def reference_swaps(files: list[dict], refs: dict | None = None, swapped: dict | None = None,
+                    scanned_at: str | None = None) -> list[dict]:
+    """Pairs of references that hold each other's episode: a file confirmed as X (title
+    card, with the filename or trusted) whose dialogue matched Y, and a file confirmed as
+    Y whose dialogue matched X. A pair swapped since these files were scanned is left out
+    (swapped: references.load_swapped; scanned_at: when the scan ran)."""
+    seen: dict[tuple, str] = {}
+    for f in files:
+        for sg in f.get("segments") or []:
+            d, c = sg.get("dialogue_code"), sg.get("code")
+            if d and c and d != c and sg.get("confidence") == "high" and "title" in (sg.get("evidence") or ""):
+                seen.setdefault((c, d), f["rel"])
+    out = []
+    for (x, y), rel in sorted(seen.items()):
+        if x < y and (y, x) in seen:
+            done = (swapped or {}).get(x) or {}
+            if done.get("with") == y and (not scanned_at or done.get("at", "") >= scanned_at):
+                continue  # swapped after this scan: the next scan shows whether it helped
+            out.append({"codes": [x, y], "files": [rel, seen[(y, x)]]})
+    return out
 
 
 def _title_card_swaps(files: list[dict], ctx) -> None:

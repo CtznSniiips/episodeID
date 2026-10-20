@@ -225,6 +225,36 @@ def _save_misses(tvdb_id: int, misses: dict) -> None:
     f.write_text(json.dumps(misses, indent=1))
 
 
+def load_swapped(tvdb_id: int) -> dict:
+    """code → {"with": the episode its reference was swapped with, "at": when}.
+    (Uploaded references carry no marker of their own.)"""
+    try:
+        return json.loads((refs_dir(tvdb_id) / "_swapped.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def swap_references(tvdb_id: int, a: str, b: str) -> int:
+    """Two references hold each other's episode (IMDb numbering a pair the other way
+    round, a mislabelled upload): swap them — downloaded and uploaded alike — and mark
+    them as checked, since title cards showed which is which."""
+    n = renumber_references(tvdb_id, {a: b, b: a})
+    from datetime import datetime, timezone
+    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    done = load_swapped(tvdb_id)
+    done.update({a: {"with": b, "at": at}, b: {"with": a, "at": at}})
+    f = refs_dir(tvdb_id) / "_swapped.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(done, indent=1))
+    for code, other in ((a, b), (b, a)):
+        raw = _read_cached(tvdb_id, code)
+        if raw:
+            raw.update(swapped_from=other, numbering_conflict=False,
+                       verified=f"swapped with {other}'s reference: title cards showed which is which")
+            _save(tvdb_id, code, raw)
+    return n
+
+
 def renumber_references(tvdb_id: int, moves: dict[str, str]) -> int:
     """TVDB moved episodes to new numbers (old code → new code): move their references
     (downloaded and uploaded) and "not found" records along with them."""
@@ -848,7 +878,10 @@ def ref_meta(tvdb_id: int) -> dict[str, dict]:
 
 
 def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
-                       retry_misses: bool = False, retry_codes: list[str] | None = None) -> dict:
+                       retry_misses: bool = False, retry_codes: list[str] | None = None,
+                       only_codes: list[str] | None = None) -> dict:
+    """Fetch references for episodes that have none. only_codes: just these episodes
+    ("Fetch missing" for one season)."""
     tvdb_id = series["tvdb_id"]
     episodes = series["episodes"]
     opts = series.get("options") or {}
@@ -867,6 +900,9 @@ def refresh_references(series: dict, ctx, force_codes: list[str] | None = None,
     page_map = opts.get("fandom_page_map") or {}
 
     wanted = [e for e in episodes if not (e["season"] == 0 and not opts.get("include_specials"))]
+    if only_codes is not None:
+        keep = set(only_codes)
+        wanted = [e for e in wanted if ep_code(e["season"], e["episode"]) in keep]
     todo = [e for e in wanted if ep_code(e["season"], e["episode"]) not in have
             and ep_code(e["season"], e["episode"]) not in misses]
     # With a wiki configured, replace OpenSubtitles references with transcripts:
