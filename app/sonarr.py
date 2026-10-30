@@ -24,26 +24,26 @@ def configured() -> bool:
     return bool(s["sonarr_url"] and s["sonarr_api_key"])
 
 
-def _get(path: str, **params):
+def _get(path: str, timeout: float = 60, **params):
     s = get_settings()
     if not configured():
         raise SonarrError("Sonarr isn't set up (Settings → Sonarr).")
     try:
         r = httpx.get(f"{s['sonarr_url'].rstrip('/')}/api/v3/{path}", params=params,
-                      headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=60)
+                      headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except (httpx.HTTPError, ValueError) as e:
         raise SonarrError(f"Couldn't reach Sonarr: {e}") from e
 
 
-def _send(method: str, path: str, body) -> object:
+def _send(method: str, path: str, body, timeout: float = 60) -> object:
     s = get_settings()
     if not configured():
         raise SonarrError("Sonarr isn't set up (Settings → Sonarr).")
     try:
         r = httpx.request(method, f"{s['sonarr_url'].rstrip('/')}/api/v3/{path}", json=body,
-                          headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=60)
+                          headers={"X-Api-Key": s["sonarr_api_key"]}, timeout=timeout)
         r.raise_for_status()
         return r.json() if r.content else None
     except (httpx.HTTPError, ValueError) as e:
@@ -155,3 +155,38 @@ def unmonitor_seasons(sonarr_series_id: int, seasons: list[int]) -> dict:
     if ids:
         _send("PUT", "episode/monitor", {"episodeIds": ids, "monitored": False})
     return {"seasons": sorted(set(seasons)), "season_flags": changed, "episodes": len(ids)}
+
+
+def season_releases(sonarr_series_id: int, season: int) -> list[dict]:
+    """Interactive search for a season, as data: every release the indexers return for
+    it (single episodes, multi-episode releases and season packs), nothing grabbed.
+    The indexers are searched live, so this can take a minute or two."""
+    return _get("release", timeout=600, seriesId=sonarr_series_id, seasonNumber=season) or []
+
+
+def grab(release: dict, sonarr_series_id: int | None = None, episode_ids: list[int] | None = None,
+         plain_ok: bool = True) -> dict:
+    """Send one release from a search to the download client. With episode_ids (Sonarr
+    v4), Sonarr is told which episodes it holds — whatever numbers its name gives — so it
+    imports and names it as those. If Sonarr won't take that, it's grabbed as it names
+    itself only when plain_ok (its numbers are the right episodes); otherwise not at all,
+    since Sonarr would import it over another episode's file."""
+    body = {"guid": release["guid"], "indexerId": release["indexerId"]}
+    if episode_ids:
+        over = {**body, "shouldOverride": True, "seriesId": sonarr_series_id, "episodeIds": episode_ids,
+                "quality": release.get("quality"), "languages": release.get("languages") or []}
+        try:
+            _send("POST", "release", over, timeout=120)
+            return {"override": True}
+        except SonarrError as e:
+            if not plain_ok:
+                raise SonarrError(f"Sonarr wouldn't take which episodes this release holds ({e}), and its "
+                                  "own numbers are another episode's — not grabbed, so it can't replace "
+                                  "that episode's file") from e
+            log.warning("Sonarr didn't take the episode override (%s); grabbing as it names itself", e)
+    _send("POST", "release", body, timeout=120)
+    return {"override": False}
+
+
+def rescan(sonarr_series_id: int) -> None:
+    _send("POST", "command", {"name": "RescanSeries", "seriesId": sonarr_series_id})

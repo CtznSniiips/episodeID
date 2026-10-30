@@ -198,7 +198,7 @@ function ago(iso) {
 function integrityLine(s) {
   const i = s.integrity;
   if (!i) return "";
-  if (!i.bad && !i.warn) return `<div class="small muted">Files checked ${ago(i.checked_at)} · all decode cleanly</div>`;
+  if (!i.bad && !i.warn) return i.checked_at ? `<div class="small muted">Files checked ${ago(i.checked_at)} · all decode cleanly</div>` : "";
   return `<div class="small"><span class="badge ${i.bad ? "b-bad" : "b-warn"} int-link" data-id="${s.id}" style="cursor:pointer"
     title="Show these files in the plan">⚠ ${i.bad ? `${i.bad} damaged file${i.bad === 1 ? "" : "s"}` : ""}${i.bad && i.warn ? " · " : ""}${i.warn ? `${i.warn} worth a look` : ""}</span></div>`;
 }
@@ -482,7 +482,7 @@ async function watchJobs() {
 
 function labelJob(kind) {
   return { scan: "Scan", fetch_refs: "Fetch references", refresh_episodes: "Load TVDB episodes",
-    apply: "Apply changes", undo: "Undo", replan: "Rebuild plan", ai_check: "Ask AI", check_files: "Check files" }[kind] || kind;
+    apply: "Apply changes", undo: "Undo", replan: "Rebuild plan", ai_check: "Ask AI", check_files: "Check files", find_releases: "Find releases" }[kind] || kind;
 }
 
 function showTab() {
@@ -523,7 +523,10 @@ function segHtml(sg, eps) {
 }
 
 async function tabPlan(reload = true) {
-  if (reload || state.ai === undefined) state.ai = !!(await api("/api/status").catch(() => ({}))).llm;
+  if (reload || state.ai === undefined) {
+    const st = await api("/api/status").catch(() => ({}));
+    state.ai = !!st.llm; state.sonarr = !!st.sonarr;
+  }
   const plan = reload || !state.plan ? await api(`/api/series/${state.series.id}/plan`) : state.plan;
   state.plan = plan;
   const tab = $("#tab");
@@ -552,6 +555,7 @@ async function tabPlan(reload = true) {
       <div class="filters">${filters.map(([k, l, n]) =>
         `<button class="btn small ${state.filter === k ? "active" : ""}" data-f="${k}">${l} (${n})</button>`).join("")}</div>
       <div class="spacer"></div>
+      ${nDamaged && state.sonarr ? `<button class="btn small" id="redl" title="Find replacements for damaged files in Sonarr, chosen by episode title">Re-download…</button>` : ""}
       <button class="btn small" id="check-files" title="Decode every file to find damaged ones (glitches, audio drifting out of sync, files cut short)">Check files…</button>
       <button class="btn small" id="sonarr-cmp" title="Check EpisodeID's view of this series' files against Sonarr's">Compare with Sonarr</button>
       <button class="btn small" id="unmon" title="Seasons where every aired episode has a correct file: stop Sonarr searching for or upgrading them">Unmonitor complete seasons…</button>
@@ -597,6 +601,8 @@ async function tabPlan(reload = true) {
   if (ap) ap.onclick = () => confirmApply(plan, actionable.filter((it) => it.selected));
   $("#sonarr-cmp", tab).onclick = () => sonarrCompareDialog();
   $("#check-files", tab).onclick = () => checkFilesDialog();
+  const rd = $("#redl", tab);
+  if (rd) rd.onclick = () => redownloadDialog();
   $("#unmon", tab).onclick = () => unmonitorDialog();
 }
 
@@ -678,6 +684,88 @@ function integrityBadge(it) {
 function integrityNote(it) {
   // the example ffmpeg message is in the badge's tooltip; the row keeps it short
   return integrityOf(it).map((r) => `<div class="small" style="color:var(--${r.status === "bad" ? "bad" : "warn"})">${esc(r.summary.replace(/ — e\.g\. “[^”]*”/, ""))}${r.status === "bad" ? " — re-download it in Sonarr" : ""}</div>`).join("");
+}
+
+// Re-download damaged files: search Sonarr's indexers for the season, pick releases by
+// episode title, grab them in Sonarr (telling it which episodes they are).
+async function redownloadDialog() {
+  const s = state.series;
+  const integ = s.integrity_files || {};
+  const damaged = Object.entries(integ).filter(([, r]) => r.status !== "ok").sort((a, b) => a[0].localeCompare(b[0]));
+  let sum;
+  try { sum = await api(`/api/series/${s.id}/redownload`); } catch (e) { return fail(e); }
+  const found = sum.files || {};
+  const req = sum.requested || {};
+  const base = (p) => p.split("/").pop();
+  const fmtSize = (n) => n ? fmtBytes(n) : "";
+  const kindBadge = { title: `<span class="badge b-ok" title="Its name carries the episode title(s)">title match</span>`,
+    numbers: `<span class="badge b-warn" title="Only numbers in its name — may be another episode if the release is numbered differently">numbers only</span>`,
+    pack: `<span class="badge b-warn" title="A whole-season release; Sonarr decides which file is which by its numbers">season pack</span>` };
+  const results = Object.entries(found).filter(([rel]) => integ[rel]);
+  const resultsHtml = results.length ? results.map(([rel, f]) => `<div class="card" style="margin:10px 0;padding:10px">
+      <div><b class="mono small">${esc(base(rel))}</b></div>
+      <div class="small muted">Holds ${f.want.map((w) => `<span class="mono">${esc(w.code)}</span> ${esc(w.title || "")}`).join(" + ")}
+        · ${f.titled} release${f.titled === 1 ? "" : "s"} name${f.titled === 1 ? "s" : ""} the title${f.found > f.candidates.length ? ` (best ${f.candidates.length} shown)` : ""}</div>
+      ${f.candidates.length ? f.candidates.map((c) => `<label class="row small" style="align-items:flex-start;gap:8px;margin-top:6px;cursor:pointer">
+        <input type="checkbox" class="rd-pick" data-rel="${esc(rel)}" data-guid="${esc(c.guid)}" ${(f.preselect || []).includes(c.guid) ? "checked" : ""}>
+        <div style="flex:1;min-width:0">${kindBadge[c.kind] || ""} <span class="mono" style="word-break:break-all">${esc(c.title)}</span>
+          <div class="muted">${esc([c.quality, fmtSize(c.size), c.indexer, c.protocol].filter(Boolean).join(" · "))}
+            ${c.extra.length ? ` · <span style="color:var(--warn)">also holds ${esc(c.extra.join(", "))}</span>` : ""}
+            ${c.covers.length < f.want.length && c.kind === "title" ? ` · only ${esc(c.covers.join(", "))}` : ""}
+          ${c.kind === "title" && (c.mapped || []).length && [...c.mapped].sort().join() !== [...c.covers, ...c.extra].sort().join() ?
+            `<div class="muted">Numbered ${esc(c.mapped.join(", "))} in its name — Sonarr is told it's ${esc([...c.covers, ...c.extra].join(", "))}</div>` : ""}</div>
+          ${c.hard_rejections.length ? `<div style="color:var(--bad)">Sonarr: ${esc(c.hard_rejections.join("; "))}</div>` : ""}
+        </div></label>`).join("") : `<div class="small muted" style="margin-top:6px">No releases found for this file's episodes.</div>`}
+    </div>`).join("") : "";
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Re-download damaged files</h2>
+      <div class="spacer"></div><button class="btn small" id="rd-x" aria-label="Close">✕</button></div>
+    <p class="small">Sonarr's own search goes by episode number, which brings back the wrong episodes when releases are
+      numbered differently. Here EpisodeID asks Sonarr to search the whole season (nothing is grabbed), then picks the
+      releases whose names carry each file's episode title. Grabbing one tells Sonarr which episode(s) it holds, so
+      Sonarr downloads, imports and names it as those; the damaged file moves to the backup folder (<span class="mono">damaged/</span>)
+      so Sonarr takes the new copy. The new file is scanned and checked for damage when it's imported.</p>
+    ${resultsHtml ? `<h3 style="margin-bottom:0">Releases found ${sum.searched_at ? `<span class="muted small">(searched ${esc(when(sum.searched_at))})</span>` : ""}</h3>
+      ${resultsHtml}
+      <div class="row" style="margin-top:10px"><span class="small muted" id="rd-n"></span><div class="spacer"></div>
+        <button class="btn primary" id="rd-grab">Grab selected</button></div><hr style="margin:16px 0">` : ""}
+    <h3 style="margin-bottom:4px">${resultsHtml ? "Search again" : "Search Sonarr"}</h3>
+    <div class="small muted" style="margin-bottom:6px">Searching runs as a job (a minute or two per season); open this again when it's done.</div>
+    <div style="max-height:30vh;overflow:auto">${damaged.map(([rel, r]) => `<label class="row small" style="gap:8px;margin:3px 0">
+      <input type="checkbox" class="rd-file" value="${esc(rel)}" ${r.status === "bad" && !req[rel] && !found[rel] ? "checked" : ""}>
+      <span class="badge ${r.status === "bad" ? "b-bad" : "b-warn"}">${r.status === "bad" ? "damaged" : "worth a look"}</span>
+      <span class="mono">${esc(base(rel))}</span>${req[rel] ? ` <span class="badge b-info" title="${esc(req[rel].map((x) => x.title).join("\n"))}">re-download requested</span>` : ""}</label>`).join("")}</div>
+    <div class="row" style="margin-top:10px"><div class="spacer"></div>
+      <button class="btn" id="rd-c">Close</button><button class="btn ${resultsHtml ? "" : "primary"}" id="rd-search">Search for the ticked files</button></div>`, { sticky: true });
+  $("#modal-box").style.width = "min(1000px, 100%)";
+  const close = () => closeModal();
+  $("#rd-x", box).onclick = close; $("#rd-c", box).onclick = close;
+  const count = () => { const n = $$(".rd-pick", box).filter((c) => c.checked).length; const el = $("#rd-n", box); if (el) el.textContent = `${n} release${n === 1 ? "" : "s"} selected`; const g = $("#rd-grab", box); if (g) g.disabled = !n; };
+  $$(".rd-pick", box).forEach((c) => c.onchange = count); count();
+  $("#rd-search", box).onclick = () => {
+    const files = $$(".rd-file", box).filter((c) => c.checked).map((c) => c.value);
+    if (!files.length) return toast("Tick at least one file");
+    close(); startJob("find_releases", { files });
+    toast("Searching Sonarr — open Re-download… again when the job is done.");
+  };
+  const g = $("#rd-grab", box);
+  if (g) g.onclick = async () => {
+    const picks = $$(".rd-pick", box).filter((c) => c.checked).map((c) => ({ rel: c.dataset.rel, guid: c.dataset.guid }));
+    const files = new Set(picks.map((p) => p.rel)).size;
+    if (!confirm(`Grab ${picks.length} release${picks.length === 1 ? "" : "s"} in Sonarr and move ${files} damaged file${files === 1 ? "" : "s"} to the backup folder?`)) return;
+    g.disabled = true; g.textContent = "Grabbing…";
+    try {
+      const r = await api(`/api/series/${s.id}/redownload`, { method: "POST", body: { picks } });
+      closeModal();
+      modal(`<h2 style="margin-top:0">Sent to Sonarr</h2>
+        ${r.grabbed.length ? `<p>${r.grabbed.length} release${r.grabbed.length === 1 ? "" : "s"} grabbed:</p><ul class="small">${r.grabbed.map((x) =>
+          `<li class="mono">${esc(x.title)} <span class="muted">→ ${x.override ? esc(x.episodes.join(", ")) : "as Sonarr names it"}</span></li>`).join("")}</ul>` : ""}
+        ${r.moved.length ? `<p class="small">${r.moved.length} damaged file${r.moved.length === 1 ? "" : "s"} moved to the backup folder (<span class="mono">damaged/</span>); Sonarr is rescanning the series.</p>` : ""}
+        ${r.failed.length ? `<p style="color:var(--bad)">Not done:</p><ul class="small">${r.failed.map((x) => `<li>${esc(x.title || x.rel)}: ${esc(x.error)}</li>`).join("")}</ul>` : ""}
+        <p class="small muted">Follow the downloads in Sonarr's Activity. Each new file is scanned and checked when Sonarr imports it (needs the import webhook).</p>
+        <div class="row"><div class="spacer"></div><button class="btn" onclick="closeModal()">Close</button></div>`);
+      state.series = await api(`/api/series/${s.id}`); tabPlan();
+    } catch (e) { fail(e); g.disabled = false; g.textContent = "Grab selected"; }
+  };
 }
 
 async function checkFilesDialog() {
@@ -1459,6 +1547,7 @@ async function renderSettings() {
     ${f("sonarr_url", "URL", "e.g. http://192.168.1.10:8989")}
     ${f("sonarr_api_key", "API key", "", "password")}
     ${cb("sonarr_rescan_after_apply", "Rescan after apply / undo")}
+    ${cb("check_imports", "Check new downloads for damage", "After scanning a file Sonarr imported, decode it from start to end (as Check files does) and flag it if it's damaged.")}
     ${cb("sonarr_import_scan", "Scan new downloads", `When Sonarr imports a file, scan just that file and flag the series if its content doesn't match its name. In Sonarr: Settings → Connect → + → Webhook, URL <span class="mono">${esc(location.origin)}/api/sonarr/webhook</span>, method POST, triggers On Import / On File Import and On Upgrade (add the username and password if you've set a login here). The series must have been scanned once.`)}
     ${test("sonarr")}</fieldset>
   <fieldset><legend>Naming</legend>

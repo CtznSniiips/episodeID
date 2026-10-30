@@ -318,6 +318,14 @@ def job_scan(ctx, params):
     ctx.log("Summary: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     if params.get("imported"):
         autocheck.note_imports(series, [f for f in files if f["rel"] in set(params["only"])], ctx)
+        if s["check_imports"]:
+            from . import integrity
+            try:
+                integrity.check_paths(series, list(params["only"]), ctx)
+            except Exception as e:  # noqa: BLE001
+                if type(e).__name__ == "Cancelled":
+                    raise
+                ctx.log(f"Couldn't check the new download(s) for damage: {e}")
     if params.get("only"):
         autocheck.record_files(series, [str(v.relative_to(root)) for v in videos])
         autocheck.check(db.get_series(series["id"]), submit=False)  # refresh the card's flag

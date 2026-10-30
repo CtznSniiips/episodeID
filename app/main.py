@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__, db, executor, jobs, llm, titlecard, tvdb
-from . import integrity, pipeline  # noqa: F401  (registers job handlers)
+from . import integrity, pipeline, redownload  # noqa: F401  (registers job handlers)
 from .config import (CACHE_DIR, MEDIA_ROOT, env_locked_keys, get_settings, public_settings,
                      safe_media_path, save_settings)
 from .references import (OpenSubtitles, _load_misses, clear_reference, ep_code, load_refs,
@@ -837,7 +837,7 @@ def titlecard_check(sid: int, body: CardCheckReq):
 @app.post("/api/series/{sid}/jobs")
 def start_job(sid: int, body: JobReq):
     db.get_series(sid) or _404()
-    if body.kind not in ("refresh_episodes", "fetch_refs", "scan", "replan", "ai_check", "check_files"):
+    if body.kind not in ("refresh_episodes", "fetch_refs", "scan", "replan", "ai_check", "check_files", "find_releases"):
         raise HTTPException(400, "Unknown job")
     if db.active_job(sid):
         raise HTTPException(409, "A job is already running for this series")
@@ -858,6 +858,31 @@ def job_get(jid: int, tail: int | None = None):
 def job_cancel(jid: int):
     jobs.cancel(jid)
     return {"ok": True}
+
+
+class RedownloadPicks(BaseModel):
+    picks: list[dict]
+
+
+@app.get("/api/series/{sid}/redownload")
+def redownload_get(sid: int):
+    s = db.get_series(sid) or _404()
+    return redownload.summary(s)
+
+
+@app.post("/api/series/{sid}/redownload")
+def redownload_post(sid: int, body: RedownloadPicks):
+    from . import sonarr
+    s = db.get_series(sid) or _404()
+    if db.active_job(sid):
+        raise HTTPException(409, "A job is running for this series — wait for it to finish.")
+    picks = [{"rel": str(p.get("rel") or ""), "guid": str(p.get("guid") or "")} for p in body.picks]
+    if not picks:
+        raise HTTPException(400, "Nothing chosen")
+    try:
+        return redownload.grab(s, picks, lambda m: log.info("%s: %s", s["name"], m))
+    except sonarr.SonarrError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 class SwapRefs(BaseModel):

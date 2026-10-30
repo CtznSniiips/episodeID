@@ -266,13 +266,15 @@ def current(series: dict) -> dict:
 
 def card_summary(series: dict) -> dict | None:
     st = load_state(series["id"])
-    if not st.get("checked_at"):
+    if not st.get("files"):
         return None
     bad = warn = 0
     for v in current(series).values():  # files as they are now (renamed ones follow; replaced drop out)
         bad += v.get("status") == "bad"
         warn += v.get("status") == "warn"
-    return {"checked_at": st["checked_at"], "checked": len(st.get("files") or {}), "bad": bad, "warn": warn}
+    if not st.get("checked_at") and not (bad or warn):
+        return None  # only new downloads checked so far, all fine: nothing to say yet
+    return {"checked_at": st.get("checked_at"), "checked": len(st.get("files") or {}), "bad": bad, "warn": warn}
 
 
 @handler("check_files")
@@ -284,13 +286,28 @@ def job_check_files(ctx, params):
     if params.get("only"):
         only = set(params["only"])
         videos = [v for v in videos if str(v.relative_to(root)) in only]
-    force = bool(params.get("force"))
+    return run_check(series, videos, ctx, force=bool(params.get("force")), keep_others=bool(params.get("only")))
+
+
+def check_paths(series: dict, rels: list[str], ctx) -> dict:
+    """Check just these files (new downloads), keeping the series' other results."""
+    root = Path(series["path"])
+    videos = [root / r for r in rels if (root / r).is_file()]
+    return run_check(series, videos, ctx, force=False, keep_others=True, quiet_start=True)
+
+
+def run_check(series: dict, videos: list[Path], ctx, force: bool = False, keep_others: bool = False,
+              quiet_start: bool = False) -> dict:
     from .titlecard import decode_method
+    root = Path(series["path"])
     todo = [v for v in videos if force or not cached(v)]
-    ctx.log(f"Checking {len(videos)} files decode cleanly ({len(todo)} to decode, "
-            f"{len(videos) - len(todo)} already checked and unchanged; decoding on {decode_method().upper()}).")
+    if quiet_start:
+        ctx.log(f"Checking {len(videos)} new download(s) decode cleanly…")
+    else:
+        ctx.log(f"Checking {len(videos)} files decode cleanly ({len(todo)} to decode, "
+                f"{len(videos) - len(todo)} already checked and unchanged; decoding on {decode_method().upper()}).")
     st = load_state(series["id"])
-    files = {} if not params.get("only") else dict(st.get("files") or {})
+    files = dict(st.get("files") or {}) if keep_others else {}
     counts = {"ok": 0, "warn": 0, "bad": 0}
     for i, v in enumerate(videos):
         ctx.check_cancel()
@@ -312,8 +329,13 @@ def job_check_files(ctx, params):
                       "problems": (r.get("problems") or [])[:12], "checked_at": r.get("checked_at")}
         if r["status"] != "ok":
             ctx.log(f"  {'⚠' if r['status'] == 'bad' else '?'} {rel}: {summary_line(r)}")
+        elif quiet_start:
+            ctx.log(f"  ✓ {rel}: decodes cleanly")
         # save as we go: a cancelled or interrupted check keeps what it found
-        _save_state(series["id"], {"checked_at": db.now(), "files": files})
-    ctx.log(f"Done: {counts['ok']} clean, {counts['warn']} worth a look, {counts['bad']} damaged."
-            + (" Damaged files need a new copy — re-download them in Sonarr." if counts["bad"] else ""))
+        # checked_at is when the whole series was last checked (new downloads alone don't count)
+        _save_state(series["id"], {"checked_at": st.get("checked_at") if quiet_start else db.now(),
+                                   "files": files})
+    if not quiet_start:
+        ctx.log(f"Done: {counts['ok']} clean, {counts['warn']} worth a look, {counts['bad']} damaged."
+                + (" Damaged files need a new copy — Re-download… in the Plan tab (Damaged)." if counts["bad"] else ""))
     return counts
