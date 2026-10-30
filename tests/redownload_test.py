@@ -299,3 +299,16 @@ redownload.follow_up(db.get_series(sid))
 req = redownload.load_state(sid)["requested"]
 assert req["missing:S02E07"]["status"] == "imported" and req["missing:S02E08"]["status"] == "imported"
 print("PASS (missing episodes: by title, a two-episode release fills both, grabbed once)")
+
+# --- records from the first version (a plain list per file) load and are followed
+import json as _json  # noqa: E402
+redownload._state_file(sid).write_text(_json.dumps({"sonarr_series_id": 9, "files": {}, "requested": {
+    bad: [{"title": "Show.S02E04E05.The.Fridge.+.The.Flower.1080p.WEB-DL", "episodes": ["S02E04", "S02E05"],
+           "at": "2026-10-30T17:00:00+00:00"}]}}))
+assert c.get(f"/api/series/{sid}").status_code == 200
+HIST[:] = [{"eventType": "grabbed", "episodeId": 1204, "sourceTitle": "Show.S02E04E05.The.Fridge.+.The.Flower.1080p.WEB-DL",
+            "downloadId": "OLD"},
+           {"eventType": "downloadFolderImported", "episodeId": 1204, "sourceTitle": "x", "downloadId": "OLD"}]
+s = c.get(f"/api/series/{sid}/redownload").json()
+assert s["requested"][bad]["status"] == "imported", s["requested"][bad]
+print("PASS (first-version records migrate)")

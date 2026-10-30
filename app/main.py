@@ -554,7 +554,8 @@ def _series_out(s: dict, full: bool = False) -> dict:
         from .redownload import missing_episodes
         out["missing_count"] = len(missing_episodes(s))
         out["redownloads"] = sum(1 for r in (_rd_state(s["id"]).get("requested") or {}).values()
-                                 if r.get("status") in ("waiting", "stuck", "failed", "partly imported"))
+                                 if isinstance(r, dict)
+                                 and r.get("status") in ("waiting", "stuck", "failed", "partly imported"))
         from .pipeline import reference_swaps
         last = db.latest_scan(s["id"]) if scan else None
         from .references import load_swapped

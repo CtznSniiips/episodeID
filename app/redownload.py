@@ -149,9 +149,21 @@ def _state_file(sid: int) -> Path:
 
 def load_state(sid: int) -> dict:
     try:
-        return json.loads(_state_file(sid).read_text())
+        st = json.loads(_state_file(sid).read_text())
     except (OSError, ValueError):
         return {}
+    # The first version kept a plain list of grabs per file ([{title, episodes, at}]) and
+    # didn't follow them: turn those into followed requests.
+    req = st.get("requested")
+    if isinstance(req, dict):
+        for rel, r in list(req.items()):
+            if isinstance(r, list):
+                req[rel] = {"status": "waiting", "auto_retry": False, "moved": not rel.startswith(MISSING),
+                            "backup": str(Path("damaged") / rel), "want": [],
+                            "grabs": [{**g, "status": "waiting"} for g in r if isinstance(g, dict)]}
+            elif not isinstance(r, dict):
+                req.pop(rel)
+    return st
 
 
 def _save_state(sid: int, st: dict) -> None:
@@ -375,6 +387,15 @@ def follow_up(series: dict, log=None) -> int:
                for g in r.get("grabs") or [] if g.get("status") == "waiting"]
     if not waiting:
         return 0
+    if any(not g.get("episode_ids") for _rel, g in waiting):
+        try:  # grabs recorded before episode ids were kept
+            ids = {_code(e["seasonNumber"], e["episodeNumber"]): e["id"]
+                   for e in sonarr.episodes(st.get("sonarr_series_id"))}
+            for _rel, g in waiting:
+                if not g.get("episode_ids"):
+                    g["episode_ids"] = [ids[c] for c in g.get("episodes") or [] if c in ids]
+        except sonarr.SonarrError:
+            pass
     since = min(g["at"] for _rel, g in waiting)
     try:
         hist = sonarr.history_since(since)
