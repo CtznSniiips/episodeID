@@ -32,6 +32,7 @@ def _startup():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     db.init()
     jobs.start()
+    redownload.start_follower()
     import threading
     from .references import warm_reference_cache
     threading.Thread(target=warm_reference_cache, name="warm-refs", daemon=True).start()
@@ -549,6 +550,11 @@ def _series_out(s: dict, full: bool = False) -> dict:
         out["backup"] = None
     if full:
         out["integrity_files"] = integrity.current(s)
+        from .redownload import load_state as _rd_state
+        from .redownload import missing_episodes
+        out["missing_count"] = len(missing_episodes(s))
+        out["redownloads"] = sum(1 for r in (_rd_state(s["id"]).get("requested") or {}).values()
+                                 if r.get("status") in ("waiting", "stuck", "failed", "partly imported"))
         from .pipeline import reference_swaps
         last = db.latest_scan(s["id"]) if scan else None
         from .references import load_swapped
@@ -862,12 +868,23 @@ def job_cancel(jid: int):
 
 class RedownloadPicks(BaseModel):
     picks: list[dict]
+    auto_retry: bool = True
 
 
 @app.get("/api/series/{sid}/redownload")
 def redownload_get(sid: int):
     s = db.get_series(sid) or _404()
     return redownload.summary(s)
+
+
+class PutBack(BaseModel):
+    rel: str
+
+
+@app.post("/api/series/{sid}/redownload/put-back")
+def redownload_put_back(sid: int, body: PutBack):
+    s = db.get_series(sid) or _404()
+    return redownload.put_back(s, body.rel)
 
 
 @app.post("/api/series/{sid}/redownload")
@@ -880,7 +897,7 @@ def redownload_post(sid: int, body: RedownloadPicks):
     if not picks:
         raise HTTPException(400, "Nothing chosen")
     try:
-        return redownload.grab(s, picks, lambda m: log.info("%s: %s", s["name"], m))
+        return redownload.grab(s, picks, lambda m: log.info("%s: %s", s["name"], m), auto_retry=body.auto_retry)
     except sonarr.SonarrError as e:
         raise HTTPException(400, str(e)) from e
 

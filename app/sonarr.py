@@ -190,3 +190,8 @@ def grab(release: dict, sonarr_series_id: int | None = None, episode_ids: list[i
 
 def rescan(sonarr_series_id: int) -> None:
     _send("POST", "command", {"name": "RescanSeries", "seriesId": sonarr_series_id})
+
+
+def history_since(date_iso: str) -> list[dict]:
+    """Sonarr's history from that moment on (grabs, imports, failed downloads)."""
+    return _get("history/since", date=date_iso) or []
