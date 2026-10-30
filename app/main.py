@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__, db, executor, jobs, llm, titlecard, tvdb
-from . import pipeline  # noqa: F401  (registers job handlers)
+from . import integrity, pipeline  # noqa: F401  (registers job handlers)
 from .config import (CACHE_DIR, MEDIA_ROOT, env_locked_keys, get_settings, public_settings,
                      safe_media_path, save_settings)
 from .references import (OpenSubtitles, _load_misses, clear_reference, ep_code, load_refs,
@@ -540,12 +540,15 @@ def _series_out(s: dict, full: bool = False) -> dict:
     root = Path(s["path"])
     flagged = [x for x in ac.get("imports") or [] if not x.get("ok") and (root / x["rel"]).exists()]
     out["file_check"] = {"checked_at": ac.get("checked_at"), "pending": pend, "imports": flagged}
+    from . import integrity
+    out["integrity"] = integrity.card_summary(s)
     from .executor import backup_videos
     try:
         out["backup"] = backup_videos(s)
     except OSError:
         out["backup"] = None
     if full:
+        out["integrity_files"] = integrity.current(s)
         from .pipeline import reference_swaps
         last = db.latest_scan(s["id"]) if scan else None
         from .references import load_swapped
@@ -834,7 +837,7 @@ def titlecard_check(sid: int, body: CardCheckReq):
 @app.post("/api/series/{sid}/jobs")
 def start_job(sid: int, body: JobReq):
     db.get_series(sid) or _404()
-    if body.kind not in ("refresh_episodes", "fetch_refs", "scan", "replan", "ai_check"):
+    if body.kind not in ("refresh_episodes", "fetch_refs", "scan", "replan", "ai_check", "check_files"):
         raise HTTPException(400, "Unknown job")
     if db.active_job(sid):
         raise HTTPException(409, "A job is already running for this series")

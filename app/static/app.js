@@ -125,6 +125,7 @@ async function route() {
     if (h.startsWith("#/settings")) await renderSettings();
     else if (h.startsWith("#/series/")) {
       if (h.split("/")[3] === "backup") state.tab = "options";
+      if (h.split("/")[3] === "damaged") { state.tab = "plan"; state.filter = "damaged"; }
       await renderSeries(+h.split("/")[2]);
       if (h.split("/")[3] === "backup") {
         // after the tab has laid out (its backup table loads a moment later)
@@ -175,7 +176,7 @@ async function renderHome() {
         <div class="bar"><div style="width:${pct}%"></div></div>
         <div class="counts">${counts}</div>
         ${fileCheckLine(s.file_check)}${s.file_check && s.file_check.checked_at ? importLine(s.file_check) : ""}
-        ${backupLine(s)}
+        ${backupLine(s)}${integrityLine(s)}
         ${s.active_job ? `<div class="small"><span class="badge b-info">${esc(s.active_job.kind)} running…</span></div>` : ""}
       </div>`;
     }).join("") + `</div>`;
@@ -185,11 +186,21 @@ async function renderHome() {
   $("#unmon-all").onclick = () => unmonitorAllDialog();
   $$(".series-card").forEach((c) => c.onclick = () => location.hash = `#/series/${c.dataset.id}`);
   $$(".bk-link").forEach((b) => b.onclick = (e) => { e.stopPropagation(); location.hash = `#/series/${b.dataset.id}/backup`; });
+  $$(".int-link").forEach((b) => b.onclick = (e) => { e.stopPropagation(); location.hash = `#/series/${b.dataset.id}/damaged`; });
 }
 
 function ago(iso) {
   const h = (Date.now() - new Date(iso).getTime()) / 3600e3;
   return h < 1 ? "under an hour ago" : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} days ago`;
+}
+
+// Check files: how many of the series' files don't decode cleanly.
+function integrityLine(s) {
+  const i = s.integrity;
+  if (!i) return "";
+  if (!i.bad && !i.warn) return `<div class="small muted">Files checked ${ago(i.checked_at)} · all decode cleanly</div>`;
+  return `<div class="small"><span class="badge ${i.bad ? "b-bad" : "b-warn"} int-link" data-id="${s.id}" style="cursor:pointer"
+    title="Show these files in the plan">⚠ ${i.bad ? `${i.bad} damaged file${i.bad === 1 ? "" : "s"}` : ""}${i.bad && i.warn ? " · " : ""}${i.warn ? `${i.warn} worth a look` : ""}</span></div>`;
 }
 
 // Video files EpisodeID moved to the series' backup folder (duplicates, originals of
@@ -471,7 +482,7 @@ async function watchJobs() {
 
 function labelJob(kind) {
   return { scan: "Scan", fetch_refs: "Fetch references", refresh_episodes: "Load TVDB episodes",
-    apply: "Apply changes", undo: "Undo", replan: "Rebuild plan", ai_check: "Ask AI" }[kind] || kind;
+    apply: "Apply changes", undo: "Undo", replan: "Rebuild plan", ai_check: "Ask AI", check_files: "Check files" }[kind] || kind;
 }
 
 function showTab() {
@@ -525,9 +536,14 @@ async function tabPlan(reload = true) {
   const counts = {};
   plan.items.forEach((it) => counts[it.kind] = (counts[it.kind] || 0) + 1);
   const actionable = plan.items.filter((it) => ACTIONABLE.includes(it.kind));
+  const integ = state.series.integrity_files || {};
+  const damaged = (it) => (it.sources || [it.source]).some((p) => integ[p] && integ[p].status !== "ok");
+  const nDamaged = plan.items.filter(damaged).length;
   const filters = [["actions", "Changes", actionable.length], ["review", "Needs review", counts.review || 0],
     ["ok", "Correct", counts.ok || 0], ["all", "All", plan.items.length]];
-  const shown = plan.items.filter((it) => state.filter === "all" ? true :
+  if (nDamaged) filters.push(["damaged", "⚠ Damaged", nDamaged]);
+  if (state.filter === "damaged" && !nDamaged) state.filter = "actions";
+  const shown = plan.items.filter((it) => state.filter === "all" ? true : state.filter === "damaged" ? damaged(it) :
     state.filter === "actions" ? ACTIONABLE.includes(it.kind) : it.kind === state.filter);
   const applied = plan.status !== "draft";
   const selCount = actionable.filter((it) => it.selected).length;
@@ -536,6 +552,7 @@ async function tabPlan(reload = true) {
       <div class="filters">${filters.map(([k, l, n]) =>
         `<button class="btn small ${state.filter === k ? "active" : ""}" data-f="${k}">${l} (${n})</button>`).join("")}</div>
       <div class="spacer"></div>
+      <button class="btn small" id="check-files" title="Decode every file to find damaged ones (glitches, audio drifting out of sync, files cut short)">Check files…</button>
       <button class="btn small" id="sonarr-cmp" title="Check EpisodeID's view of this series' files against Sonarr's">Compare with Sonarr</button>
       <button class="btn small" id="unmon" title="Seasons where every aired episode has a correct file: stop Sonarr searching for or upgrading them">Unmonitor complete seasons…</button>
       <span class="muted small">Plan #${plan.id} · ${esc(when(plan.created))}${applied ? " · <b>applied</b>" : ""}</span>
@@ -579,6 +596,7 @@ async function tabPlan(reload = true) {
   const ap = $("#apply", tab);
   if (ap) ap.onclick = () => confirmApply(plan, actionable.filter((it) => it.selected));
   $("#sonarr-cmp", tab).onclick = () => sonarrCompareDialog();
+  $("#check-files", tab).onclick = () => checkFilesDialog();
   $("#unmon", tab).onclick = () => unmonitorDialog();
 }
 
@@ -644,6 +662,45 @@ function coverageHtml(plan, series) {
   </details>`;
 }
 
+function integrityOf(it) {
+  const integ = state.series.integrity_files || {};
+  return (it.sources || [it.source]).map((p) => integ[p] && { ...integ[p], rel: p }).filter((r) => r && r.status !== "ok");
+}
+
+function integrityBadge(it) {
+  const bad = integrityOf(it);
+  if (!bad.length) return "";
+  const worst = bad.some((r) => r.status === "bad");
+  const tip = bad.map((r) => `${r.rel}: ${r.summary}${(r.problems || []).length ? "\n" + r.problems.slice(0, 8).map((p) => `  ~${fmtTime(p.t)} ${p.msg}`).join("\n") : ""}`).join("\n\n");
+  return `<span class="badge ${worst ? "b-bad" : "b-warn"}" title="${esc(tip)}">${worst ? "⚠ damaged" : "⚠ playback issue?"}</span>`;
+}
+
+function integrityNote(it) {
+  // the example ffmpeg message is in the badge's tooltip; the row keeps it short
+  return integrityOf(it).map((r) => `<div class="small" style="color:var(--${r.status === "bad" ? "bad" : "warn"})">${esc(r.summary.replace(/ — e\.g\. “[^”]*”/, ""))}${r.status === "bad" ? " — re-download it in Sonarr" : ""}</div>`).join("");
+}
+
+async function checkFilesDialog() {
+  const s = state.series;
+  const box = modal(`<h2 style="margin-top:0">Check files — ${esc(s.name)}</h2>
+    <p>Decodes every video file from start to end to find damaged ones: visual glitches, audio drifting out of sync,
+      downloads cut short. Problems show in the plan (<span class="badge b-bad">⚠ damaged</span>) and on the series card.
+      Nothing is moved or deleted — re-download damaged files in Sonarr.</p>
+    <p class="muted small">Each file is decoded once (the GPU is used when there is one — roughly a minute or two per
+      episode, longer on the CPU); files already checked are skipped unless they've changed. You can keep using
+      EpisodeID meanwhile, and cancel any time — what's been checked is kept.</p>
+    <label class="small"><input type="checkbox" id="cf-force"> Check again files already checked</label>
+    <div class="row" style="margin-top:14px"><div class="spacer"></div>
+      <button class="btn" id="cf-c">Cancel</button><button class="btn primary" id="cf-go">Check files</button></div>`);
+  $("#cf-c", box).onclick = () => closeModal();
+  $("#cf-go", box).onclick = () => {
+    const force = $("#cf-force", box).checked;
+    closeModal();
+    startJob("check_files", { force });
+    toast("Checking files — see the job log.");
+  };
+}
+
 function rowHtml(it, eps, applied) {
   const actionable = ACTIONABLE.includes(it.kind);
   const targets = (it.targets || []).map((t) =>
@@ -662,7 +719,9 @@ function rowHtml(it, eps, applied) {
       ${it.ref_warning ? '<span class="badge b-warn">check reference</span>' : ""}
       ${it.elimination ? '<span class="badge b-info" title="Settled by what\'s around it: the other files and episodes of the season">by elimination</span>' : ""}
       ${((state.series.file_check || {}).imports || []).some((x) => (it.sources || [it.source]).includes(x.rel)) ? '<span class="badge b-bad" title="Sonarr imported this file recently and its content doesn\'t match its name">new download</span>' : ""}
+      ${integrityBadge(it)}
       ${(it.sources || [it.source]).map((p) => `<div class="path" style="margin-top:4px">${it.sources ? "+ " : ""}${esc(p)}</div>`).join("")}${targets}
+      ${integrityNote(it)}
       ${it.kind === "split" && it.cuts ? `<div class="small" style="margin-top:2px"><span class="badge b-info">cut points chosen</span>
         ${it.cuts.map((c) => c == null ? "auto" : fmtCut(c)).join(", ")}</div>` : ""}
       <div class="muted small">${esc(it.reason || "")}</div></td>

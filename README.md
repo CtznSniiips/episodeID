@@ -65,6 +65,16 @@ For shows that put the episode title on screen, EpisodeID can read it with OCR (
 - A read that contradicts the filename (an intro roll call of names, a sign) doesn't end the search for the card: the scan keeps going, and a card that fits the filename wins over other text read within 2 minutes of it. A file whose card really contradicts its name is still caught.
 - Only large on-screen text counts, and it must match one title clearly better than any other, so signs and credits in the background are ignored. OCR results are cached; to read the cards from the videos again, use *Series options → Rescan, re-reading title cards*.
 
+### Check files
+
+A file can be the right episode and still be damaged — visual glitches, then audio and video drifting out of sync. *Check files…* (Plan tab) decodes every video file of the series from start to end (on the GPU when there is one: NVDEC, or VAAPI) and reads its stream lengths and start times. It reports:
+
+- errors while decoding, with roughly where they happen ("46 errors while decoding around 12:10, 12:26…");
+- decoding that stops well before the file's stated length (a download cut short);
+- audio and video of clearly different lengths, or starting more than a second apart.
+
+Five or more errors, or a file cut short, marks it **⚠ damaged**; fewer, or only a length/start mismatch, **⚠ playback issue?**. Plan rows get the badge (hover for the error messages) and a *Damaged* filter; the series card shows "⚠ 2 damaged files" (click it to see them) or "all decode cleanly". Nothing is moved or deleted — re-download damaged files in Sonarr. Results are cached by file size and date: later checks only decode new or replaced files (tick *Check again files already checked* to redo them), and a result follows its file through a rename. Cancelling keeps what was checked so far.
+
 ### Safety
 
 - Nothing is deleted unless you ask: *Series options → Backup folder* shows what's there (count and size per folder) and deletes the folders you tick, after typing DELETE. A series with video files in its backup folder shows "🗄 N backed-up videos · size" on its card on the Series page; click it to go straight to that section. Displaced files go to `_episodeid_backup/<Show>/` **beside** the series folder (in the same TV folder — not inside the series, so Sonarr doesn't pick them up; a backup folder left inside a series by an older version is moved there automatically, and Undo keeps working): `duplicates/`, `unverified/` (its name was needed by a confirmed file), `split_originals/`, `joined_parts/`, `metadata/` (stale `.nfo`/thumbnails), `conflicts/`, `undone/`. The top of the backup folder gets ignore files so media servers that scan the TV folder skip it: `.ignore` (Jellyfin; Emby 4.8), `.embyignore` (Emby 4.9+), `.plexignore` (Plex) and `.nomedia` (Kodi). Ones already there are left as they are.
