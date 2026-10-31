@@ -164,6 +164,11 @@ def season_releases(sonarr_series_id: int, season: int) -> list[dict]:
     return _get("release", timeout=600, seriesId=sonarr_series_id, seasonNumber=season) or []
 
 
+def episode_releases(episode_id: int) -> list[dict]:
+    """Interactive search for one episode (also refreshes Sonarr's memory of the results)."""
+    return _get("release", timeout=600, episodeId=episode_id) or []
+
+
 def grab(release: dict, sonarr_series_id: int | None = None, episode_ids: list[int] | None = None,
          plain_ok: bool = True) -> dict:
     """Send one release from a search to the download client. With episode_ids (Sonarr

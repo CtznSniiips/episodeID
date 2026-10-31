@@ -260,7 +260,29 @@ def _grab_one(c: dict, sid: int, sonarr_eps: dict) -> dict:
     # Grabbed as it numbers itself, Sonarr would import it as c["mapped"]: that's only
     # safe when those are the episodes meant (numbers-only and pack picks are chosen as such).
     plain_ok = c["kind"] != "title" or sorted(c.get("mapped") or []) == sorted(meant)
-    return sonarr.grab(c["release"], sid, ids or None, plain_ok=plain_ok)
+    try:
+        return sonarr.grab(c["release"], sid, ids or None, plain_ok=plain_ok)
+    except sonarr.SonarrError as e:
+        if "404" not in str(e):
+            raise
+    # Sonarr only remembers search results for about half an hour: after that a grab
+    # answers 404. Search again for the episode (that refreshes Sonarr's memory) and grab
+    # the same release from the new results.
+    fresh = _fresh_release(c, [sonarr_eps[x] for x in c["covers"] if x in sonarr_eps])
+    if not fresh:
+        raise sonarr.SonarrError("the indexers don't offer this release any more (searched again)")
+    c["release"] = fresh
+    return sonarr.grab(fresh, sid, ids or None, plain_ok=plain_ok)
+
+
+def _fresh_release(c: dict, episode_ids: list[int]) -> dict | None:
+    """The same release in a new search for its episode (same guid, or same name on the same indexer)."""
+    for eid in episode_ids[:1]:
+        for r in sonarr.episode_releases(eid):
+            if r.get("guid") == c["guid"] or (
+                    _norm(r.get("title")) == _norm(c["title"]) and r.get("indexerId") == (c.get("release") or {}).get("indexerId")):
+                return {k: r.get(k) for k in ("guid", "indexerId", "quality", "languages")}
+    return None
 
 
 def _keep(c: dict) -> dict:
@@ -371,6 +393,16 @@ def _age(iso: str) -> float:
         return 0.0
 
 
+def _ts(iso: str | None) -> float:
+    """Seconds since the epoch for an ISO time ("…Z" or "+00:00"); a missing one counts as new."""
+    from datetime import datetime, timezone
+    try:
+        d = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+        return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+    except ValueError:
+        return float("inf")
+
+
 def _norm(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (t or "").lower())
 
@@ -406,12 +438,21 @@ def follow_up(series: dict, log=None) -> int:
     for rel, g in waiting:
         ids = set(g.get("episode_ids") or [])
         if not g.get("download_id"):
-            hit = next((h for h in hist if h.get("eventType") == "grabbed" and h.get("episodeId") in ids
-                        and _norm(h.get("sourceTitle")) == _norm(g["title"])), None)
+            grabs_here = [h for h in hist if h.get("eventType") == "grabbed" and h.get("episodeId") in ids
+                          and _ts(h.get("date")) >= _ts(g["at"]) - 120]
+            # Sonarr may record the name a little differently: by name first, else the
+            # first grab of these episodes after ours
+            hit = next((h for h in grabs_here if _norm(h.get("sourceTitle")) == _norm(g["title"])), None) or \
+                next((h for h in sorted(grabs_here, key=lambda h: _ts(h.get("date")))
+                      if not any(x.get("download_id") == h.get("downloadId")
+                                 for _r, x in waiting if x is not g)), None)
             if hit:
                 g["download_id"] = hit.get("downloadId")
             elif _age(g["at"]) > GRAB_SEEN_WITHIN:
-                g.update(status="failed", reason="Sonarr has no record of the grab")
+                seen = sum(1 for h in hist if h.get("episodeId") in ids)
+                g.update(status="failed", reason="Sonarr's history shows no grab for "
+                         + (", ".join(g.get("episodes") or []) or "it") + " since then"
+                         + (f" ({seen} other event{'s' if seen != 1 else ''})" if seen else ""))
                 changed += 1
                 continue
         did = g.get("download_id")
@@ -469,13 +510,17 @@ def _retry(r: dict, sid: int | None, log, rel: str) -> dict | None:
         return None
     need = {c for g in grabs for c in g.get("episodes") or []} or set(r.get("want") or [])
     tried = {g.get("guid") for g in grabs}
+    # the same release posted to another indexer would fail the same way (and Sonarr has
+    # blocklisted the failed one by name)
+    tried_titles = {_norm(g.get("title")) for g in grabs}
     try:
         sonarr_eps = {_code(e["seasonNumber"], e["episodeNumber"]): e["id"] for e in sonarr.episodes(sid)}
     except sonarr.SonarrError as e:
         log(f"{rel}: couldn't retry — {e}")
         return None
     for c in r.get("candidates") or []:
-        if c["guid"] in tried or c["kind"] != "title" or c.get("extra") or not need <= set(c["covers"]):
+        if c["guid"] in tried or _norm(c["title"]) in tried_titles or c["kind"] != "title" or c.get("extra") \
+                or c.get("hard_rejections") or not need <= set(c["covers"]):
             continue
         tried.add(c["guid"])
         try:

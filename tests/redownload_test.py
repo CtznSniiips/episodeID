@@ -50,13 +50,16 @@ RELEASES = {2: [
     rel_("Show.S02.1080p.WEB-DL", [], "g-pack", full=True),
     rel_("Show.S02E01.The.Remote.1080p.WEB-DL", [(2, 1)], "g-remote", rej=["Release is blocklisted"]),
     rel_("Show.S02E02.The.Remote.1080p.WEB-DL", [(2, 2)], "g-remote2"),
+    rel_("Show.S02E04E05.The.Fridge.+.The.Flower.1080p.WEB-DL", [(2, 4), (2, 5)], "g-pair-other-indexer"),
+    rel_("Show.S02E04E05.The.Fridge.and.The.Flower.1080p.AMZN.WEB-DL", [(2, 4), (2, 5)], "g-pair-blocked",
+         rej=["Release is blocklisted"]),
 ]}
 
 want = ["S02E04", "S02E05"]
 c = redownload.candidates(want, RELEASES[2], EPS, SN, "webdl-1080p")
 order = [x["guid"] for x in c]
 print("  ", order)
-assert order[0] == "g-pair" and order[1] == "g-pair-720", order       # both titles first, then quality
+assert order[:4] == ["g-pair", "g-pair-other-indexer", "g-pair-720", "g-pair-blocked"], order  # blocklisted last
 assert order.index("g-fridge-misnumbered") < order.index("g-numbers") < order.index("g-pack")
 assert redownload.preselect(want, c) == ["g-pair"]
 one = redownload.candidates(["S02E01"], RELEASES[2], EPS, SN, "webdl-1080p")
@@ -312,3 +315,38 @@ HIST[:] = [{"eventType": "grabbed", "episodeId": 1204, "sourceTitle": "Show.S02E
 s = c.get(f"/api/series/{sid}/redownload").json()
 assert s["requested"][bad]["status"] == "imported", s["requested"][bad]
 print("PASS (first-version records migrate)")
+
+
+# --- Sonarr forgets search results after ~30 min: a grab then answers 404 → search the episode again
+sent.clear()
+st0 = redownload.load_state(sid); st0["requested"] = {}; redownload._save_state(sid, st0)
+(root / bad).write_bytes(b"q" * 1000)
+redownload.job_find_releases(JobContext(db.add_job("find_releases", sid, {}), sid), {"files": [bad]})
+db.conn().execute("UPDATE jobs SET status='done'")
+fresh_calls = []
+sonarr.episode_releases = lambda eid: fresh_calls.append(eid) or [
+    {**rel_("Show.S02E04E05.The.Fridge.+.The.Flower.1080p.WEB-DL", [(2, 4), (2, 5)], "g-pair-NEWGUID")}]
+cache_ok = set()
+
+
+def forgetful(method, path, body, timeout=60):
+    if path == "release" and body["guid"] not in cache_ok:
+        raise sonarr.SonarrError("Sonarr refused the change: Client error '404 Not Found'")
+    sent.append((method, path, body))
+    return {}
+
+
+cache_ok.add("g-pair-NEWGUID")
+sonarr._send = forgetful
+r = c.post(f"/api/series/{sid}/redownload", json={"picks": [{"rel": bad, "guid": "g-pair"}]}).json()
+assert r["grabbed"] and fresh_calls == [1204], (r, fresh_calls)
+assert [b["guid"] for m, p, b in sent if p == "release"] == ["g-pair-NEWGUID"]
+print("PASS (after Sonarr forgets the search, the episode is searched again and the same release grabbed)")
+
+# Sonarr's history names the release a little differently: still matched (episode + time).
+HIST[:] = [{"eventType": "grabbed", "episodeId": 1204, "sourceTitle": "Show S02E04E05 The Fridge The Flower 1080p WEB-DL [x]",
+            "downloadId": "Z1", "date": "2999-01-01T00:00:00Z"},
+           {"eventType": "downloadFolderImported", "episodeId": 1204, "downloadId": "Z1", "date": "2999-01-01T00:10:00Z"}]
+redownload.follow_up(db.get_series(sid))
+assert redownload.load_state(sid)["requested"][bad]["status"] == "imported"
+print("PASS (grab found by episode and time when the name differs)")
