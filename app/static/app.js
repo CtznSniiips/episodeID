@@ -727,12 +727,23 @@ function shortReason(r) {
 
 // Re-download damaged files and missing episodes: three tabs — what's downloading, the
 // releases found to choose from, and what to search for.
-async function redownloadDialog(tab) {
+// tab: which tab to show. cached: the last data, for switching tabs without fetching
+// again. refresh: a background refresh — dropped if the dialog was closed meanwhile.
+async function redownloadDialog(tab, cached, refresh = false) {
   const s = state.series;
   const integ = s.integrity_files || {};
   const damaged = Object.entries(integ).filter(([, r]) => r.status !== "ok").sort((a, b) => a[0].localeCompare(b[0]));
-  let sum;
-  try { sum = await api(`/api/series/${s.id}/redownload`); } catch (e) { return fail(e); }
+  // what's ticked now, so a redraw (fresh data, a filter) keeps it
+  const ticks = {};
+  $$("#rd-body input[type=checkbox]").forEach((c) => { ticks[c.id || `${c.className}|${c.value}|${c.dataset.rel || ""}|${c.dataset.guid || ""}`] = c.checked; });
+  let sum = cached;
+  if (!sum) {
+    // while the (sometimes slow) fetch runs, the dialog that's open stays as it is
+    const tabsNow = $$(".rd-tab");
+    tabsNow.forEach((a) => a.style.opacity = a.dataset.t === tab ? "1" : ".6");
+    try { sum = await api(`/api/series/${s.id}/redownload`); } catch (e) { return fail(e); }
+    if (refresh && !$("#rd-body")) return;  // closed, or another dialog opened, meanwhile
+  }
   const found = sum.files || {};
   const req = sum.requested || {};
   const missing = sum.missing || [];
@@ -843,24 +854,36 @@ async function redownloadDialog(tab) {
       the backup folder (<span class="mono">damaged/</span>) so Sonarr takes the new copy. New files are scanned and checked for damage when imported.</details>
     ${hint}
     <div class="tabs" style="margin:8px 0 12px">${tabs.map(([k, l]) => `<a href="#" class="rd-tab ${k === pickTab ? "active" : ""}" data-t="${k}">${l}</a>`).join("")}</div>
-    <div id="rd-body">${pickTab === "downloads" ? downloadsHtml : pickTab === "choose" ? chooseHtml : searchHtml}</div>`, { sticky: true });
+    <div id="rd-body">${[["downloads", downloadsHtml], ["choose", chooseHtml], ["search", searchHtml]].map(([k, h]) =>
+      `<div class="rd-pane" data-t="${k}" ${k === pickTab ? "" : "hidden"}>${h}</div>`).join("")}</div>`, { sticky: true });
   $("#modal-box").style.width = "min(1000px, 100%)";
   state.rdTab = pickTab;
-  const reopen = (t) => { closeModal(); redownloadDialog(t); };
+  $$("input[type=checkbox]", box).forEach((c) => {
+    const k = c.id || `${c.className}|${c.value}|${c.dataset.rel || ""}|${c.dataset.guid || ""}`;
+    if (k in ticks) c.checked = ticks[k];
+  });
+  // Redraw in place (no closing): with fresh data after a change, or the same data for a tab switch.
+  const reopen = (t, fresh = true, bg = false) => redownloadDialog(t, fresh ? undefined : sum, bg);
   $("#rd-x", box).onclick = () => { state.rdTab = null; clearTimeout(state.rdTimer); closeModal(); };
   // Downloads in progress: refresh every 15 s while this tab is showing (not while an
   // attempts list is unfolded, so it doesn't snap shut under the mouse)
   clearTimeout(state.rdTimer);
-  if (pickTab === "downloads" && nActive) {
+  if (nActive) {
     const tick = () => {
       if (!document.body.contains(box) || !$("#rd-body", box)) return;  // dialog closed
-      if ($$("details[open]", $("#rd-body", box)).length) { state.rdTimer = setTimeout(tick, 15000); return; }
-      reopen("downloads");
+      // not while another tab is showing, or an attempts list is unfolded
+      if (state.rdTab !== "downloads" || $$('.rd-pane[data-t="downloads"] details[open]', box).length) { state.rdTimer = setTimeout(tick, 15000); return; }
+      reopen("downloads", true, true);
     };
     state.rdTimer = setTimeout(tick, 15000);
   }
-  $$(".rd-tab", box).forEach((a) => a.onclick = (e) => { e.preventDefault(); state.rdTab = a.dataset.t; reopen(a.dataset.t); });
-  $$(".rd-f", box).forEach((b) => b.onclick = () => { state.rdFilter = b.dataset.f; reopen("downloads"); });
+  $$(".rd-tab", box).forEach((a) => a.onclick = (e) => {
+    e.preventDefault();
+    state.rdTab = a.dataset.t;
+    $$(".rd-tab", box).forEach((x) => x.classList.toggle("active", x === a));
+    $$(".rd-pane", box).forEach((p) => p.hidden = p.dataset.t !== a.dataset.t);
+  });
+  $$(".rd-f", box).forEach((b) => b.onclick = () => { state.rdFilter = b.dataset.f; reopen("downloads", false); });
   const clr = $("#rd-clear", box);
   if (clr) clr.onclick = async () => {
     try { const r = await api(`/api/series/${s.id}/redownload/clear`, { method: "POST" }); toast(`Cleared ${r.cleared}`); reopen("downloads"); }
