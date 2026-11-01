@@ -735,6 +735,10 @@ async function redownloadDialog(tab, cached, refresh = false) {
   const damaged = Object.entries(integ).filter(([, r]) => r.status !== "ok").sort((a, b) => a[0].localeCompare(b[0]));
   // what's ticked now, so a redraw (fresh data, a filter) keeps it
   const ticks = {};
+  // and where each list is scrolled to, and which attempt lists are unfolded
+  const scrolls = { modal: $("#modal").scrollTop, box: $("#modal-box").scrollTop };
+  $$("#rd-body [data-scroll]").forEach((el) => { scrolls[el.dataset.scroll] = el.scrollTop; });
+  const openDetails = Object.fromEntries($$("#rd-body details[data-k]").map((d) => [d.dataset.k, d.open]));
   $$("#rd-body input[type=checkbox]").forEach((c) => { ticks[c.id || `${c.className}|${c.value}|${c.dataset.rel || ""}|${c.dataset.guid || ""}`] = c.checked; });
   let sum = cached;
   if (!sum) {
@@ -776,7 +780,7 @@ async function redownloadDialog(tab, cached, refresh = false) {
       ${Object.keys(RS).filter((k) => counts[k]).map((k) => `<button class="btn small rd-f ${filt === k ? "active" : ""}" data-f="${k}">${RS[k][1]} (${counts[k]})</button>`).join("")}
       <div class="spacer"></div>
       ${finished ? `<button class="btn small" id="rd-clear" title="Remove entries that are over: done, put back, or failed with nothing left to deal with">Clear finished (${finished})</button>` : ""}</div>
-    <div style="max-height:52vh;overflow:auto">${shown.map(({ r, last, rels }) => {
+    <div data-scroll="dl" style="max-height:52vh;overflow:auto">${shown.map(({ r, last, rels }) => {
       const [cls, lab] = RS[r.status] || ["", r.status];
       const tries = (r.grabs || []).length;
       return `<div class="row small" style="gap:8px;padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start">
@@ -788,7 +792,7 @@ async function redownloadDialog(tab, cached, refresh = false) {
           ${r.status === "waiting" ? progressHtml(((r.grabs || []).filter((x) => x.status === "waiting").pop() || {}).progress) : ""}
           ${r.status === "waiting" && r.auto_retry ? `<div class="muted">tries the next release with the title if this fails (${tries} of 5 tried)</div>` : ""}
           ${r.restore_note ? `<div class="muted">${esc(r.restore_note)}</div>` : ""}
-          ${tries > 1 ? `<details><summary class="muted" style="cursor:pointer">${tries} attempts</summary>${(r.grabs || []).map((g) => `<div class="muted mono" style="word-break:break-all;margin-left:12px">• ${esc(g.title)}${g.reason ? ` — <span style="color:var(--bad);font-family:inherit">${esc(shortReason(g.reason))}</span>` : g.status === "imported" ? " — ✓" : ""}</div>`).join("")}</details>` : ""}
+          ${tries > 1 ? `<details data-k="att|${esc(rels[0])}"><summary class="muted" style="cursor:pointer">${tries} attempts</summary>${(r.grabs || []).map((g) => `<div class="muted mono" style="word-break:break-all;margin-left:12px">• ${esc(g.title)}${g.reason ? ` — <span style="color:var(--bad);font-family:inherit">${esc(shortReason(g.reason))}</span>` : g.status === "imported" ? " — ✓" : ""}</div>`).join("")}</details>` : ""}
         </div>
         ${r.moved && !r.restored && ["waiting", "stuck", "failed"].includes(r.status) ? rels.map((p) => `<button class="btn small rd-back" data-rel="${esc(p)}" title="Move the damaged file back from the backup folder">Put back</button>`).join("") : ""}
       </div>`; }).join("") || `<div class="small muted">Nothing here.</div>`}</div>
@@ -802,7 +806,7 @@ async function redownloadDialog(tab, cached, refresh = false) {
     pack: `<span class="badge b-warn" title="A whole-season release; Sonarr decides which file is which by its numbers">season pack</span>` };
   const chooseHtml = results.length ? `
     <div class="small muted" style="margin-bottom:6px">${sum.searched_at ? `Searched ${esc(when(sum.searched_at))}. ` : ""}The best release with the title is ticked for each; untick to skip one.</div>
-    <div style="max-height:46vh;overflow:auto">${results.map(([rel, f]) => `<details class="card" style="margin:6px 0;padding:8px 10px" ${results.length <= 6 ? "open" : ""}>
+    <div data-scroll="choose" style="max-height:46vh;overflow:auto">${results.map(([rel, f]) => `<details class="card" data-k="ch|${esc(rel)}" style="margin:6px 0;padding:8px 10px" ${results.length <= 6 ? "open" : ""}>
       <summary style="cursor:pointer"><b>${esc(label(rel))}</b> <span class="muted small">${f.missing ? "missing" : "damaged"} ·
         ${f.titled} with the title${(f.preselect || []).length ? "" : ` · <span style="color:var(--warn)">nothing ticked</span>`}</span></summary>
       ${f.candidates.length ? f.candidates.map((c) => `<label class="row small" style="align-items:flex-start;gap:8px;margin-top:6px;cursor:pointer">
@@ -822,7 +826,7 @@ async function redownloadDialog(tab, cached, refresh = false) {
   const busy = (k) => req[k] && ["waiting", "imported"].includes(req[k].status);  // underway, or arrived (scan to confirm)
   const searchHtml = `${damaged.length || missing.length ? "" : `<div class="small muted">No damaged files or missing episodes.</div>`}
     ${damaged.length || missing.length ? `<div class="row small" style="gap:8px;margin-bottom:6px"><a href="#" id="rd-all">tick all</a> · <a href="#" id="rd-none">none</a></div>` : ""}
-    <div style="max-height:46vh;overflow:auto">
+    <div data-scroll="search" style="max-height:46vh;overflow:auto">
       ${damaged.map(([rel, r]) => `<label class="row small" style="gap:8px;margin:3px 0">
         <input type="checkbox" class="rd-file" value="${esc(rel)}" ${r.status === "bad" && !busy(rel) && !found[rel] ? "checked" : ""}>
         <span class="badge ${r.status === "bad" ? "b-bad" : "b-warn"}" style="min-width:70px;text-align:center">${r.status === "bad" ? "damaged" : "worth a look"}</span>
@@ -862,6 +866,10 @@ async function redownloadDialog(tab, cached, refresh = false) {
     const k = c.id || `${c.className}|${c.value}|${c.dataset.rel || ""}|${c.dataset.guid || ""}`;
     if (k in ticks) c.checked = ticks[k];
   });
+  $$("details[data-k]", box).forEach((d) => { if (d.dataset.k in openDetails) d.open = openDetails[d.dataset.k]; });
+  $$("[data-scroll]", box).forEach((el) => { if (el.dataset.scroll in scrolls) el.scrollTop = scrolls[el.dataset.scroll]; });
+  if (scrolls.modal) $("#modal").scrollTop = scrolls.modal;
+  if (scrolls.box) $("#modal-box").scrollTop = scrolls.box;
   // Redraw in place (no closing): with fresh data after a change, or the same data for a tab switch.
   const reopen = (t, fresh = true, bg = false) => redownloadDialog(t, fresh ? undefined : sum, bg);
   $("#rd-x", box).onclick = () => { state.rdTab = null; clearTimeout(state.rdTimer); closeModal(); };
