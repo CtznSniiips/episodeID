@@ -16,6 +16,7 @@ imported, the import webhook scans it (and checks it decodes cleanly).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import re
 import shutil
 from pathlib import Path
@@ -163,6 +164,17 @@ def load_state(sid: int) -> dict:
                             "grabs": [{**g, "status": "waiting"} for g in r if isinstance(g, dict)]}
             elif not isinstance(r, dict):
                 req.pop(rel)
+                continue
+            # Grabs an earlier version gave up on as "not in Sonarr's history" (it read the
+            # history from a moment too late): look again, once, without starting new attempts.
+            fix = [g for g in req[rel].get("grabs") or [] if not g.get("rechecked")
+                   and re.match(r"Sonarr(?:'s history shows no grab| has no record)", g.get("reason") or "")]
+            for g in fix:
+                g.update(status="waiting", rechecked=True)
+                g.pop("reason", None)
+            if fix and req[rel].get("status") in ("failed", "partly imported"):
+                req[rel]["status"] = "waiting"
+                req[rel]["recheck_only"] = True
     return st
 
 
@@ -379,6 +391,7 @@ def grab(series: dict, picks: list[dict], ctx_log=None, auto_retry: bool = True)
 
 # --------------------------------------------------------- following the grabs
 
+HISTORY_SLACK = 10 * 60        # read Sonarr's history from this long before a grab was noted
 GRAB_SEEN_WITHIN = 30 * 60      # no "grabbed" in Sonarr's history after this long: it never happened
 STUCK_AFTER = 48 * 3600         # downloading/importing for longer than this: needs a look
 _IMPORTED = ("downloadFolderImported", "seriesFolderImported")
@@ -428,7 +441,11 @@ def follow_up(series: dict, log=None) -> int:
                     g["episode_ids"] = [ids[c] for c in g.get("episodes") or [] if c in ids]
         except sonarr.SonarrError:
             pass
-    since = min(g["at"] for _rel, g in waiting)
+    # Sonarr records the grab while EpisodeID's request is still under way — a moment
+    # *before* the time EpisodeID notes — so read from a little earlier (and allow for the
+    # two clocks being a few minutes apart).
+    since = datetime.fromtimestamp(min(_ts(g["at"]) for _rel, g in waiting) - HISTORY_SLACK,
+                                   timezone.utc).isoformat(timespec="seconds")
     try:
         hist = sonarr.history_since(since)
     except sonarr.SonarrError as e:
@@ -439,18 +456,18 @@ def follow_up(series: dict, log=None) -> int:
         ids = set(g.get("episode_ids") or [])
         if not g.get("download_id"):
             grabs_here = [h for h in hist if h.get("eventType") == "grabbed" and h.get("episodeId") in ids
-                          and _ts(h.get("date")) >= _ts(g["at"]) - 120]
+                          and _ts(h.get("date")) >= _ts(g["at"]) - HISTORY_SLACK]
             # Sonarr may record the name a little differently: by name first, else the
             # first grab of these episodes after ours
             hit = next((h for h in grabs_here if _norm(h.get("sourceTitle")) == _norm(g["title"])), None) or \
                 next((h for h in sorted(grabs_here, key=lambda h: _ts(h.get("date")))
-                      if not any(x.get("download_id") == h.get("downloadId")
+                      if not any(x.get("download_id") == h.get("downloadId") and x.get("guid") != g.get("guid")
                                  for _r, x in waiting if x is not g)), None)
             if hit:
                 g["download_id"] = hit.get("downloadId")
             elif _age(g["at"]) > GRAB_SEEN_WITHIN:
                 seen = sum(1 for h in hist if h.get("episodeId") in ids)
-                g.update(status="failed", reason="Sonarr's history shows no grab for "
+                g.update(status="failed", rechecked=True, reason="Sonarr's history shows no grab for "
                          + (", ".join(g.get("episodes") or []) or "it") + " since then"
                          + (f" ({seen} other event{'s' if seen != 1 else ''})" if seen else ""))
                 changed += 1
@@ -477,13 +494,19 @@ def follow_up(series: dict, log=None) -> int:
         states = [g.get("status") for g in r.get("grabs") or []]
         if "waiting" in states:
             continue
+        recheck = r.pop("recheck_only", False)
+        got = {c for g in r.get("grabs") or [] if g.get("status") == "imported" for c in g.get("episodes") or []}
+        want = set(r.get("want") or []) or {c for g in r.get("grabs") or [] for c in g.get("episodes") or []}
         if "imported" in states:
-            r["status"] = "imported" if all(s == "imported" for s in states) else "partly imported"
+            # done when what was wanted arrived — earlier failed attempts don't matter
+            r["status"] = "imported" if want <= got else "partly imported"
             log(f"{rel}: replacement imported" if r["status"] == "imported" else
                 f"{rel}: only some replacements imported — the damaged file stays in the backup folder")
         elif "stuck" in states:
             r["status"] = "stuck"
             log(f"{rel}: replacement not imported after 2 days — check Sonarr's Activity queue")
+        elif recheck:
+            r["status"] = "failed"  # looked at again after an update: no new attempts started
         else:
             nxt = _retry(r, st.get("sonarr_series_id"), log, rel) if r.get("auto_retry") else None
             if nxt:
@@ -585,6 +608,19 @@ def put_back(series: dict, rel: str) -> dict:
     return {"ok": ok, "note": why}
 
 
+def clear_finished(series: dict) -> int:
+    """Forget re-downloads that are over: done, put back, or failed with nothing left in
+    the backup folder to deal with. Returns how many were cleared."""
+    st = load_state(series["id"])
+    req = st.get("requested") or {}
+    gone = [rel for rel, r in req.items() if r.get("status") in ("imported", "cancelled")
+            or (r.get("status") == "failed" and (not r.get("moved") or r.get("restored")))]
+    for rel in gone:
+        req.pop(rel)
+    _save_state(series["id"], st)
+    return len(gone)
+
+
 def follow_up_all() -> None:
     for s in db.list_series():
         st = load_state(s["id"])
@@ -620,6 +656,39 @@ def sonarr_redownload_settings() -> dict | None:
             "interactive": bool(c.get("autoRedownloadFailedFromInteractiveSearch"))}
 
 
+_STATES = {"downloading": "downloading", "queued": "queued in the download client", "paused": "paused",
+           "delay": "waiting (Sonarr's delay profile)", "downloadClientUnavailable": "download client unreachable",
+           "completed": "downloaded", "failed": "failed", "warning": "needs attention"}
+_TRACKED = {"importPending": "waiting to import", "importing": "importing", "imported": "imported",
+            "importBlocked": "import blocked", "failedPending": "failing", "failed": "failed"}
+
+
+def attach_progress(req: dict, queue: list[dict]) -> None:
+    """Add where each download in progress is, from Sonarr's queue: per cent done, time
+    left, and its state ("downloading", "waiting to import", "import blocked: …")."""
+    for r in req.values():
+        if r.get("status") != "waiting":
+            continue
+        g = next((x for x in reversed(r.get("grabs") or []) if x.get("status") == "waiting"), None)
+        if not g:
+            continue
+        ids = set(g.get("episode_ids") or [])
+        q = next((x for x in queue if g.get("download_id") and x.get("downloadId") == g["download_id"]), None) or \
+            next((x for x in queue if _norm(x.get("title")) == _norm(g.get("title"))), None) or \
+            next((x for x in queue if x.get("episodeId") in ids), None)
+        if not q:
+            g["progress"] = {"state": "not in Sonarr's queue (finished, or not started yet)"}
+            continue
+        size, left = float(q.get("size") or 0), float(q.get("sizeleft") or 0)
+        state = _TRACKED.get(q.get("trackedDownloadState")) if q.get("trackedDownloadState") not in (None, "downloading") \
+            else _STATES.get(q.get("status"), q.get("status") or "")
+        msgs = [m for sm in q.get("statusMessages") or [] for m in sm.get("messages") or []] + \
+            ([q["errorMessage"]] if q.get("errorMessage") else [])
+        g["progress"] = {"pct": round(100 * (size - left) / size) if size else None, "timeleft": q.get("timeleft"),
+                         "state": state, "message": "; ".join(dict.fromkeys(msgs))[:200] or None,
+                         "client": q.get("downloadClient")}
+
+
 def summary(series: dict) -> dict:
     if sonarr.configured():
         try:
@@ -627,6 +696,12 @@ def summary(series: dict) -> dict:
         except Exception:  # noqa: BLE001
             log_.exception("following re-downloads")
     st = load_state(series["id"])
+    req = st.get("requested") or {}
+    if sonarr.configured() and any(r.get("status") == "waiting" for r in req.values()):
+        try:
+            attach_progress(req, sonarr.queue(st.get("sonarr_series_id")))
+        except Exception:  # noqa: BLE001 — progress is a nice-to-have
+            log_.exception("reading Sonarr's queue")
     return {"searched_at": st.get("searched_at"), "files": st.get("files") or {},
-            "requested": st.get("requested") or {}, "missing": missing_episodes(series),
+            "requested": req, "missing": missing_episodes(series),
             "sonarr_redownload": sonarr_redownload_settings() if sonarr.configured() else None}

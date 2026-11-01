@@ -350,3 +350,95 @@ HIST[:] = [{"eventType": "grabbed", "episodeId": 1204, "sourceTitle": "Show S02E
 redownload.follow_up(db.get_series(sid))
 assert redownload.load_state(sid)["requested"][bad]["status"] == "imported"
 print("PASS (grab found by episode and time when the name differs)")
+
+# --- Sonarr records the grab a moment *before* EpisodeID notes it: history is read from earlier
+asked_since = []
+sonarr.history_since = lambda date: asked_since.append(date) or list(HIST)
+sonarr._send = lambda method, path, body, timeout=60: sent.append((method, path, body)) or {}
+st0 = redownload.load_state(sid); st0["requested"] = {}; redownload._save_state(sid, st0)
+(root / bad).write_bytes(b"w" * 1000)
+redownload.job_find_releases(JobContext(db.add_job("find_releases", sid, {}), sid), {"files": [bad]})
+db.conn().execute("UPDATE jobs SET status='done'")
+c.post(f"/api/series/{sid}/redownload", json={"picks": [{"rel": bad, "guid": "g-pair"}], "auto_retry": False})
+at = redownload.load_state(sid)["requested"][bad]["grabs"][0]["at"]
+from datetime import datetime as _dt  # noqa: E402
+before = (_dt.fromisoformat(at) - timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
+HIST[:] = [{"eventType": "grabbed", "episodeId": 1204, "sourceTitle": "Show.S02E04E05.The.Fridge.+.The.Flower.1080p.WEB-DL",
+            "downloadId": "EARLY", "date": before},
+           {"eventType": "downloadFailed", "episodeId": 1204, "downloadId": "EARLY", "date": at,
+            "data": {"message": "Aborted, cannot be completed - https://sabnzbd.org/not-complete"}}]
+redownload.follow_up(db.get_series(sid))
+r = redownload.load_state(sid)["requested"][bad]
+assert r["grabs"][0]["download_id"] == "EARLY" and "Aborted" in r["grabs"][0]["reason"], r["grabs"][0]
+assert redownload._ts(asked_since[-1]) <= redownload._ts(at) - redownload.HISTORY_SLACK + 1, asked_since
+print("PASS (grab recorded just before EpisodeID noted it is found)")
+
+# --- two missing episodes sharing one release: both follow the same download
+st0 = redownload.load_state(sid); st0["requested"] = {}; redownload._save_state(sid, st0)
+redownload.job_find_releases(JobContext(db.add_job("find_releases", sid, {}), sid), {"missing": ["S02E07", "S02E08"]})
+db.conn().execute("UPDATE jobs SET status='done'")
+c.post(f"/api/series/{sid}/redownload", json={"picks": [{"rel": "missing:S02E07", "guid": "g-phone-job"},
+                                                       {"rel": "missing:S02E08", "guid": "g-phone-job"}]})
+HIST[:] = [{"eventType": "grabbed", "episodeId": 1207, "sourceTitle": "Show S02E07E08 renamed", "downloadId": "PJ",
+            "date": "2999-01-01T00:00:00Z"},
+           {"eventType": "grabbed", "episodeId": 1208, "sourceTitle": "Show S02E07E08 renamed", "downloadId": "PJ",
+            "date": "2999-01-01T00:00:00Z"},
+           {"eventType": "downloadFolderImported", "episodeId": 1207, "downloadId": "PJ", "date": "2999-01-01T00:09:00Z"}]
+redownload.follow_up(db.get_series(sid))
+req = redownload.load_state(sid)["requested"]
+assert req["missing:S02E07"]["status"] == req["missing:S02E08"]["status"] == "imported", req
+print("PASS (one release for two missing episodes: both followed)")
+
+# --- a missing episode that arrived on the second try is done, not "partly"
+req["missing:S02E07"]["grabs"].insert(0, {"title": "x", "status": "failed", "episodes": ["S02E07"], "reason": "download failed"})
+req["missing:S02E07"]["status"] = "waiting"
+req["missing:S02E07"]["grabs"][-1]["status"] = "imported"
+st0 = redownload.load_state(sid); st0["requested"] = req; redownload._save_state(sid, st0)
+st0["requested"]["missing:S02E07"]["grabs"].append({"title": "y", "status": "waiting", "episodes": ["S02E07"],
+                                                    "episode_ids": [1207], "at": "2999-01-01T00:00:00+00:00",
+                                                    "download_id": "PJ"})
+redownload._save_state(sid, st0)
+redownload.follow_up(db.get_series(sid))
+assert redownload.load_state(sid)["requested"]["missing:S02E07"]["status"] == "imported"
+print("PASS (done after an earlier failed attempt)")
+
+# --- old "no grab" failures are looked at again once, without new attempts
+st0 = redownload.load_state(sid)
+st0["requested"] = {"missing:S02E09": {"status": "failed", "auto_retry": True, "want": ["S02E09"], "moved": False,
+                                       "candidates": [], "grabs": [{"title": "Show.S02E09.Halloween", "guid": "h1",
+                                       "episodes": ["S02E09"], "episode_ids": [1209], "at": "2999-01-01T00:00:00+00:00",
+                                       "status": "failed", "reason": "Sonarr has no record of the grab"}]}}
+redownload._save_state(sid, st0)
+sent.clear()
+HIST[:] = [{"eventType": "grabbed", "episodeId": 1209, "sourceTitle": "Show.S02E09.Halloween", "downloadId": "H1",
+            "date": "2998-12-31T23:59:58Z"},
+           {"eventType": "downloadFailed", "episodeId": 1209, "downloadId": "H1", "date": "2999-01-01T00:05:00Z",
+            "data": {"message": "Aborted"}}]
+redownload.follow_up(db.get_series(sid))
+r = redownload.load_state(sid)["requested"]["missing:S02E09"]
+assert r["status"] == "failed" and r["grabs"][0]["download_id"] == "H1" and "Aborted" in r["grabs"][0]["reason"], r
+assert not [b for m, p, b in sent if p == "release"], "a recheck starts nothing new"
+print("PASS (old 'no grab' failures rechecked once)")
+
+# --- Clear finished
+assert c.post(f"/api/series/{sid}/redownload/clear").json()["cleared"] == 1
+assert not redownload.load_state(sid)["requested"]
+print("PASS (clear finished)")
+
+# --- progress from Sonarr's queue
+req = {"a": {"status": "waiting", "grabs": [{"title": "Show.S02E07E08.The.Phone.The.Job.1080p", "status": "waiting",
+                                             "download_id": "Q1", "episode_ids": [1207]}]},
+       "b": {"status": "waiting", "grabs": [{"title": "Other.Name", "status": "waiting", "episode_ids": [1209]}]},
+       "c": {"status": "waiting", "grabs": [{"title": "Gone", "status": "waiting", "episode_ids": [1299]}]},
+       "d": {"status": "imported", "grabs": [{"title": "x", "status": "imported"}]}}
+Q = [{"downloadId": "Q1", "title": "whatever", "size": 1000, "sizeleft": 250, "timeleft": "00:12:30", "status": "downloading",
+      "trackedDownloadState": "downloading", "episodeId": 1207},
+     {"downloadId": "Q2", "title": "Show.S02E09", "size": 500, "sizeleft": 0, "status": "completed",
+      "trackedDownloadState": "importBlocked", "episodeId": 1209,
+      "statusMessages": [{"title": "x", "messages": ["Episode was not found in the grabbed release"]}]}]
+redownload.attach_progress(req, Q)
+pa, pb, pc = (req[k]["grabs"][0]["progress"] for k in "abc")
+assert pa["pct"] == 75 and pa["timeleft"] == "00:12:30" and pa["state"] == "downloading", pa
+assert pb["pct"] == 100 and pb["state"] == "import blocked" and "not found" in pb["message"], pb
+assert "not in Sonarr's queue" in pc["state"] and "progress" not in req["d"]["grabs"][0]
+print("PASS (progress from Sonarr's queue)")

@@ -139,13 +139,23 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 
+// "v0.1.0 · Nov 1 10:40 · abc1234": which build is running, so an update is easy to confirm.
+function versionChip(s) {
+  const b = s.build || {};
+  const d = b.built ? new Date(b.built) : null;
+  const when = d && !isNaN(d) ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+  const tip = [`EpisodeID ${s.version}`, d && !isNaN(d) ? `${b.source === "ci" ? "built" : "files last changed"} ${d.toLocaleString()}` : "",
+    b.commit ? `commit ${b.commit}` : ""].filter(Boolean).join("\n");
+  return `<span class="chip" title="${esc(tip)}">v${esc(s.version)}${when ? ` · ${esc(when)}` : ""}${b.commit ? ` · <span class="mono">${esc(b.commit)}</span>` : ""}</span>`;
+}
+
 async function refreshChips() {
   try {
     const s = await api("/api/status");
     const chip = (on, label) => `<span class="chip ${on ? "on" : ""}">${on ? "●" : "○"} ${label}</span>`;
     $("#chips").innerHTML = chip(s.tvdb, "TVDB") + chip(s.opensubtitles, "OpenSubtitles") +
       chip(s.whisper, "Whisper") + chip(s.titlecards, "Title cards") + chip(s.llm, "AI") + chip(s.sonarr, "Sonarr") +
-      `<span class="chip">v${esc(s.version)}</span>`;
+      versionChip(s);
     return s;
   } catch { return {}; }
 }
@@ -688,7 +698,36 @@ function integrityNote(it) {
 
 // Re-download damaged files: search Sonarr's indexers for the season, pick releases by
 // episode title, grab them in Sonarr (telling it which episodes they are).
-async function redownloadDialog() {
+// Where a download is, from Sonarr's queue: a bar with per cent done, time left and state.
+function progressHtml(p) {
+  if (!p) return "";
+  const left = (() => {
+    const m = /^(?:(\d+)\.)?(\d+):(\d+):(\d+)/.exec(p.timeleft || "");
+    if (!m) return "";
+    const mins = (+(m[1] || 0)) * 1440 + (+m[2]) * 60 + (+m[3]);
+    return mins >= 60 ? `${Math.floor(mins / 60)} h ${mins % 60} min left` : mins ? `${mins} min left` : "under a minute left";
+  })();
+  const bad = /blocked|failed|attention|unreachable|failing/.test(p.state || "");
+  return `<div class="row" style="gap:8px;margin:3px 0;align-items:center">
+    ${p.pct != null ? `<div class="bar" style="flex:0 0 160px;margin:0"><div style="width:${p.pct}%"></div></div><span>${p.pct}%</span>` : ""}
+    <span class="${bad ? "" : "muted"}" style="${bad ? "color:var(--bad)" : ""}">${esc([p.state, left].filter(Boolean).join(" · "))}</span></div>
+    ${p.message ? `<div style="color:var(--${bad ? "bad" : "warn"})">${esc(p.message)}</div>` : ""}`;
+}
+
+// Plain-language version of a re-download's failure reason (older entries kept Sonarr's raw errors).
+function shortReason(r) {
+  if (!r) return "";
+  if (/404 Not Found/.test(r)) return "Sonarr had forgotten the search results — search again (newer versions do this by themselves)";
+  if (/wouldn't take which episodes/.test(r)) return "Sonarr wouldn't accept which episode it is, and its own numbers point elsewhere — not grabbed";
+  if (/^Sonarr(?:'s history shows no grab| has no record)/.test(r)) return "no grab found in Sonarr's history";
+  if (/Aborted, cannot be completed|not-complete/.test(r)) return "download failed: incomplete on the usenet server";
+  if (/^download failed/.test(r)) return r.replace(/\s*-?\s*https?:\/\/\S+/g, "");
+  return r.replace(/\s*For more information check:.*$/, "").replace(/ for url '[^']*'/, "").slice(0, 160);
+}
+
+// Re-download damaged files and missing episodes: three tabs — what's downloading, the
+// releases found to choose from, and what to search for.
+async function redownloadDialog(tab) {
   const s = state.series;
   const integ = s.integrity_files || {};
   const damaged = Object.entries(integ).filter(([, r]) => r.status !== "ok").sort((a, b) => a[0].localeCompare(b[0]));
@@ -696,99 +735,159 @@ async function redownloadDialog() {
   try { sum = await api(`/api/series/${s.id}/redownload`); } catch (e) { return fail(e); }
   const found = sum.files || {};
   const req = sum.requested || {};
-  const epTitle = (c) => ((s.episodes || []).find((e) => e.code === c) || {}).title || "";
-  const base = (p) => p.startsWith("missing:") ? `${p.slice(8)} ${epTitle(p.slice(8))} (missing)` : p.split("/").pop();
   const missing = sum.missing || [];
+  const epTitle = (c) => ((s.episodes || []).find((e) => e.code === c) || {}).title || "";
+  const label = (p) => p.startsWith("missing:") ? `${p.slice(8)} ${epTitle(p.slice(8))}` : p.split("/").pop();
   const fmtSize = (n) => n ? fmtBytes(n) : "";
-  const kindBadge = { title: `<span class="badge b-ok" title="Its name carries the episode title(s)">title match</span>`,
+  const RS = { waiting: ["b-info", "downloading"], imported: ["b-ok", "done"], "partly imported": ["b-warn", "partly done"],
+    failed: ["b-bad", "failed"], stuck: ["b-warn", "stuck in Sonarr"], cancelled: ["", "put back"] };
+  const results = Object.entries(found).filter(([rel, f]) => integ[rel] || f.missing);
+
+  // ---- Downloads: one row per release, newest attempt shown, earlier ones folded away
+  const groups = new Map();
+  for (const [rel, r] of Object.entries(req)) {
+    const last = (r.grabs || [])[r.grabs.length - 1] || {};
+    const key = `${r.status}|${last.guid || last.title || rel}`;
+    if (!groups.has(key)) groups.set(key, { r, last, rels: [] });
+    groups.get(key).rels.push(rel);
+  }
+  const ORDER = ["waiting", "stuck", "failed", "partly imported", "imported", "cancelled"];  // what needs watching first
+  const rows = [...groups.values()].sort((a, b) => (ORDER.indexOf(a.r.status) - ORDER.indexOf(b.r.status))
+    || a.rels[0].localeCompare(b.rels[0]));
+  const counts = {};
+  rows.forEach((g) => counts[g.r.status] = (counts[g.r.status] || 0) + g.rels.length);
+  const filt = state.rdFilter && counts[state.rdFilter] ? state.rdFilter : "all";
+  const shown = rows.filter((g) => filt === "all" || g.r.status === filt);
+  const finished = Object.values(req).filter((r) => ["imported", "cancelled"].includes(r.status) || (r.status === "failed" && (!r.moved || r.restored))).length;
+  const downloadsHtml = rows.length ? `
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="btn small rd-f ${filt === "all" ? "active" : ""}" data-f="all">All (${Object.keys(req).length})</button>
+      ${Object.keys(RS).filter((k) => counts[k]).map((k) => `<button class="btn small rd-f ${filt === k ? "active" : ""}" data-f="${k}">${RS[k][1]} (${counts[k]})</button>`).join("")}
+      <div class="spacer"></div>
+      ${finished ? `<button class="btn small" id="rd-clear" title="Remove entries that are over: done, put back, or failed with nothing left to deal with">Clear finished (${finished})</button>` : ""}</div>
+    <div style="max-height:52vh;overflow:auto">${shown.map(({ r, last, rels }) => {
+      const [cls, lab] = RS[r.status] || ["", r.status];
+      const tries = (r.grabs || []).length;
+      return `<div class="row small" style="gap:8px;padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start">
+        <span class="badge ${cls}" style="white-space:nowrap;min-width:84px;text-align:center">${esc(lab)}</span>
+        <div style="flex:1;min-width:0">
+          <div><b>${rels.map((p) => esc(label(p))).join(" + ")}</b>${rels.every((p) => p.startsWith("missing:")) ? ` <span class="muted">· was missing</span>` : ""}</div>
+          <div class="muted mono" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(last.title || "")}">${last.retry ? "retry: " : ""}${esc(last.title || "")}</div>
+          ${last.reason ? `<div style="color:var(--bad)">${esc(shortReason(last.reason))}</div>` : ""}
+          ${r.status === "waiting" ? progressHtml(((r.grabs || []).filter((x) => x.status === "waiting").pop() || {}).progress) : ""}
+          ${r.status === "waiting" && r.auto_retry ? `<div class="muted">tries the next release with the title if this fails (${tries} of 5 tried)</div>` : ""}
+          ${r.restore_note ? `<div class="muted">${esc(r.restore_note)}</div>` : ""}
+          ${tries > 1 ? `<details><summary class="muted" style="cursor:pointer">${tries} attempts</summary>${(r.grabs || []).map((g) => `<div class="muted mono" style="word-break:break-all;margin-left:12px">• ${esc(g.title)}${g.reason ? ` — <span style="color:var(--bad);font-family:inherit">${esc(shortReason(g.reason))}</span>` : g.status === "imported" ? " — ✓" : ""}</div>`).join("")}</details>` : ""}
+        </div>
+        ${r.moved && !r.restored && ["waiting", "stuck", "failed"].includes(r.status) ? rels.map((p) => `<button class="btn small rd-back" data-rel="${esc(p)}" title="Move the damaged file back from the backup folder">Put back</button>`).join("") : ""}
+      </div>`; }).join("") || `<div class="small muted">Nothing here.</div>`}</div>
+    <div class="small muted" style="margin-top:8px">Checked in Sonarr's history every few minutes. If a download fails and no other release
+      with the title is left, a damaged file is put back so the episode isn't left without one.</div>` :
+    `<div class="small muted">Nothing re-downloaded yet. Search for releases, then choose them on the <b>Choose releases</b> tab.</div>`;
+
+  // ---- Choose releases
+  const kindBadge = { title: `<span class="badge b-ok" title="Its name carries the episode title(s)">title</span>`,
     numbers: `<span class="badge b-warn" title="Only numbers in its name — may be another episode if the release is numbered differently">numbers only</span>`,
     pack: `<span class="badge b-warn" title="A whole-season release; Sonarr decides which file is which by its numbers">season pack</span>` };
-  const results = Object.entries(found).filter(([rel, f]) => integ[rel] || f.missing);
-  const RS = { waiting: ["b-info", "downloading…"], imported: ["b-ok", "done ✓"], "partly imported": ["b-warn", "partly replaced"],
-    failed: ["b-bad", "re-download failed"], stuck: ["b-warn", "stuck in Sonarr"], cancelled: ["", "put back"] };
-  const reqs = Object.entries(req).sort((a, b) => a[0].localeCompare(b[0]));
-  const reqHtml = reqs.length ? `<h3 style="margin-bottom:4px">Re-downloads</h3>
-    <div class="small muted" style="margin-bottom:6px">Followed in Sonarr's history every few minutes. If a download fails, the damaged
-      file is put back so the episode isn't left missing (unless Sonarr has a file for it again).</div>
-    ${reqs.map(([rel, r]) => { const [cls, label] = RS[r.status] || ["", r.status];
-      return `<div class="row small" style="gap:8px;margin:4px 0;align-items:flex-start">
-        <span class="badge ${cls}" style="white-space:nowrap">${esc(label)}</span>
-        <div style="flex:1;min-width:0"><span class="mono">${esc(base(rel))}</span>
-          ${r.auto_retry && r.status === "waiting" ? `<div class="muted">retries the next titled release if this one fails (${(r.grabs || []).length} of 5 tried)</div>` : ""}
-          ${(r.grabs || []).map((g) => `<div class="muted mono" style="word-break:break-all">↳ ${g.retry ? "<i>retry:</i> " : ""}${esc(g.title)}${g.reason ? ` — <span style="color:var(--bad)">${esc(g.reason)}</span>` : ""}</div>`).join("")}
-          ${r.restore_note ? `<div class="muted">${esc(r.restore_note)}</div>` : ""}</div>
-        ${r.moved && !r.restored && ["waiting", "stuck", "failed"].includes(r.status) ? `<button class="btn small rd-back" data-rel="${esc(rel)}" title="Move the damaged file back from the backup folder">Put back</button>` : ""}
-      </div>`; }).join("")}<hr style="margin:16px 0">` : "";
-  const sr = sum.sonarr_redownload;
-  const hint = sr && !sr.failed && !sr.interactive ? `<div class="small muted" style="margin-bottom:10px">✓ Sonarr won't search again by itself when one of these downloads fails.</div>` :
-    `<div class="card small" style="margin-bottom:12px;border-color:var(--warn)"><b>⚠ ${sr ? "Turn off Sonarr's automatic re-download first" : "Check Sonarr's automatic re-download"}</b><br>
-      When a download fails, Sonarr can blocklist it and search again by itself — by episode <i>number</i>, which grabs the wrong
-      episodes for shows numbered differently. In Sonarr: <b>Settings → Download Clients → Failed Download Handling</b> (click <i>Show Advanced</i> if it's hidden),
-      turn off <b>Redownload Failed</b> and <b>Redownload Failed from Interactive Search</b>${sr ? ` (now: ${sr.failed ? "on" : "off"} / ${sr.interactive ? "on" : "off"})` : ""}.
-      A failed download then just fails: EpisodeID puts the damaged file back and you pick the next release here.
-      These are global Sonarr settings — turn them back on when you're done if you like.</div>`;
-  const resultsHtml = results.length ? results.map(([rel, f]) => `<div class="card" style="margin:10px 0;padding:10px">
-      <div><b class="mono small">${esc(base(rel))}</b></div>
-      <div class="small muted">${f.missing ? "Wants" : "Holds"} ${f.want.map((w) => `<span class="mono">${esc(w.code)}</span> ${esc(w.title || "")}`).join(" + ")}
-        · ${f.titled} release${f.titled === 1 ? "" : "s"} name${f.titled === 1 ? "s" : ""} the title${f.found > f.candidates.length ? ` (best ${f.candidates.length} shown)` : ""}</div>
+  const chooseHtml = results.length ? `
+    <div class="small muted" style="margin-bottom:6px">${sum.searched_at ? `Searched ${esc(when(sum.searched_at))}. ` : ""}The best release with the title is ticked for each; untick to skip one.</div>
+    <div style="max-height:46vh;overflow:auto">${results.map(([rel, f]) => `<details class="card" style="margin:6px 0;padding:8px 10px" ${results.length <= 6 ? "open" : ""}>
+      <summary style="cursor:pointer"><b>${esc(label(rel))}</b> <span class="muted small">${f.missing ? "missing" : "damaged"} ·
+        ${f.titled} with the title${(f.preselect || []).length ? "" : ` · <span style="color:var(--warn)">nothing ticked</span>`}</span></summary>
       ${f.candidates.length ? f.candidates.map((c) => `<label class="row small" style="align-items:flex-start;gap:8px;margin-top:6px;cursor:pointer">
         <input type="checkbox" class="rd-pick" data-rel="${esc(rel)}" data-guid="${esc(c.guid)}" ${(f.preselect || []).includes(c.guid) ? "checked" : ""}>
         <div style="flex:1;min-width:0">${kindBadge[c.kind] || ""} <span class="mono" style="word-break:break-all">${esc(c.title)}</span>
-          <div class="muted">${esc([c.quality, fmtSize(c.size), c.indexer, c.protocol].filter(Boolean).join(" · "))}
-            ${c.extra.length ? ` · <span style="color:var(--warn)">also holds ${esc(c.extra.join(", "))}</span>` : ""}
-            ${(c.fills || []).length ? ` · <span style="color:var(--ok)">also fills missing ${esc(c.fills.join(", "))}</span>` : ""}
-            ${c.covers.length < f.want.length && c.kind === "title" ? ` · only ${esc(c.covers.join(", "))}` : ""}
-          ${c.kind === "title" && (c.mapped || []).length && [...c.mapped].sort().join() !== [...c.covers, ...c.extra].sort().join() ?
-            `<div class="muted">Numbered ${esc(c.mapped.join(", "))} in its name — Sonarr is told it's ${esc([...c.covers, ...c.extra].join(", "))}</div>` : ""}</div>
+          <div class="muted">${esc([c.quality, fmtSize(c.size), c.indexer].filter(Boolean).join(" · "))}${c.extra.length ? ` · <span style="color:var(--warn)">also holds ${esc(c.extra.join(", "))}</span>` : ""}${(c.fills || []).length ? ` · <span style="color:var(--ok)">also fills ${esc(c.fills.join(", "))}</span>` : ""}${c.covers.length < f.want.length && c.kind === "title" ? ` · only ${esc(c.covers.join(", "))}` : ""}${c.kind === "title" && (c.mapped || []).length && [...c.mapped].sort().join() !== [...c.covers, ...c.extra, ...(c.fills || [])].sort().join() ? ` · numbered ${esc(c.mapped.join(", "))} in its name` : ""}</div>
           ${c.hard_rejections.length ? `<div style="color:var(--bad)">Sonarr: ${esc(c.hard_rejections.join("; "))}</div>` : ""}
-        </div></label>`).join("") : `<div class="small muted" style="margin-top:6px">No releases found for this file's episodes.</div>`}
-    </div>`).join("") : "";
-  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Re-download damaged files &amp; missing episodes</h2>
-      <div class="spacer"></div><button class="btn small" id="rd-x" aria-label="Close">✕</button></div>
-    <p class="small">Sonarr's own search goes by episode number, which brings back the wrong episodes when releases are
-      numbered differently. Here EpisodeID asks Sonarr to search the whole season (nothing is grabbed), then picks the
-      releases whose names carry each file's episode title. Grabbing one tells Sonarr which episode(s) it holds, so
-      Sonarr downloads, imports and names it as those; the damaged file moves to the backup folder (<span class="mono">damaged/</span>)
-      so Sonarr takes the new copy. Missing episodes work the same way, with nothing to move. New files are scanned and
-      checked for damage when they're imported.</p>
-    ${hint}${reqHtml}
-    ${resultsHtml ? `<h3 style="margin-bottom:0">Releases found ${sum.searched_at ? `<span class="muted small">(searched ${esc(when(sum.searched_at))})</span>` : ""}</h3>
-      ${resultsHtml}
-      <label class="small" style="display:block;margin-top:10px"><input type="checkbox" id="rd-retry" checked>
-        If a download fails, try the file's next release whose name has the episode title (up to 5 releases; never numbers-only
-        releases or ones that hold other episodes too). When none are left, the damaged file is put back.</label>
-      <div class="row" style="margin-top:10px"><span class="small muted" id="rd-n"></span><div class="spacer"></div>
-        <button class="btn primary" id="rd-grab">Grab selected</button></div><hr style="margin:16px 0">` : ""}
-    <h3 style="margin-bottom:4px">${resultsHtml ? "Search again" : "Search Sonarr"}</h3>
-    <div class="small muted" style="margin-bottom:6px">Searching runs as a job (a minute or two per season); open this again when it's done.</div>
-    ${damaged.length || missing.length ? "" : `<div class="small muted">No damaged files or missing episodes to search for.</div>`}
-    <div style="max-height:30vh;overflow:auto">${damaged.map(([rel, r]) => `<label class="row small" style="gap:8px;margin:3px 0">
-      <input type="checkbox" class="rd-file" value="${esc(rel)}" ${r.status === "bad" && !(req[rel] && req[rel].status === "waiting") && !found[rel] ? "checked" : ""}>
-      <span class="badge ${r.status === "bad" ? "b-bad" : "b-warn"}">${r.status === "bad" ? "damaged" : "worth a look"}</span>
-      <span class="mono">${esc(base(rel))}</span>${req[rel] ? ` <span class="badge ${(RS[req[rel].status] || [""])[0]}">${esc((RS[req[rel].status] || ["", req[rel].status])[1])}</span>` : ""}</label>`).join("")}
+        </div></label>`).join("") : `<div class="small muted" style="margin-top:6px">No releases found.</div>`}
+    </details>`).join("")}</div>
+    <label class="small" style="display:block;margin-top:8px"><input type="checkbox" id="rd-retry" checked>
+      If a download fails, try the next release with the title (up to 5; never numbers-only releases or ones holding other episodes too)</label>
+    <div class="row" style="margin-top:8px"><span class="small muted" id="rd-n"></span><div class="spacer"></div>
+      <button class="btn primary" id="rd-grab">Grab selected</button></div>` :
+    `<div class="small muted">No search results waiting. Tick what to look for on the <b>Search</b> tab.</div>`;
+
+  // ---- Search
+  const busy = (k) => req[k] && ["waiting", "imported"].includes(req[k].status);  // underway, or arrived (scan to confirm)
+  const searchHtml = `${damaged.length || missing.length ? "" : `<div class="small muted">No damaged files or missing episodes.</div>`}
+    ${damaged.length || missing.length ? `<div class="row small" style="gap:8px;margin-bottom:6px"><a href="#" id="rd-all">tick all</a> · <a href="#" id="rd-none">none</a></div>` : ""}
+    <div style="max-height:46vh;overflow:auto">
+      ${damaged.map(([rel, r]) => `<label class="row small" style="gap:8px;margin:3px 0">
+        <input type="checkbox" class="rd-file" value="${esc(rel)}" ${r.status === "bad" && !busy(rel) && !found[rel] ? "checked" : ""}>
+        <span class="badge ${r.status === "bad" ? "b-bad" : "b-warn"}" style="min-width:70px;text-align:center">${r.status === "bad" ? "damaged" : "worth a look"}</span>
+        <span>${esc(label(rel))}</span>${req[rel] ? ` <span class="badge ${(RS[req[rel].status] || [""])[0]}">${esc((RS[req[rel].status] || ["", req[rel].status])[1])}</span>` : ""}</label>`).join("")}
       ${missing.map((m) => { const k = "missing:" + m.code; return `<label class="row small" style="gap:8px;margin:3px 0">
-        <input type="checkbox" class="rd-miss" value="${esc(m.code)}" ${!(req[k] && req[k].status === "waiting") && !found[k] ? "checked" : ""}>
-        <span class="badge">missing</span><span class="mono">${esc(m.code)}</span> ${esc(m.title || "")}${req[k] ? ` <span class="badge ${(RS[req[k].status] || [""])[0]}">${esc((RS[req[k].status] || ["", req[k].status])[1])}</span>` : ""}</label>`; }).join("")}</div>
-    <div class="row" style="margin-top:10px"><div class="spacer"></div>
-      <button class="btn" id="rd-c">Close</button><button class="btn ${resultsHtml ? "" : "primary"}" id="rd-search">Search for the ticked ones</button></div>`, { sticky: true });
+        <input type="checkbox" class="rd-miss" value="${esc(m.code)}" ${!busy(k) && !found[k] ? "checked" : ""}>
+        <span class="badge" style="min-width:70px;text-align:center">missing</span><span>${esc(m.code)} ${esc(m.title || "")}</span>${req[k] ? ` <span class="badge ${(RS[req[k].status] || [""])[0]}">${esc((RS[req[k].status] || ["", req[k].status])[1])}</span>` : ""}</label>`; }).join("")}</div>
+    <div class="row" style="margin-top:10px"><span class="small muted">Runs as a job, a minute or two per season. The results show on <b>Choose releases</b>.</span>
+      <div class="spacer"></div><button class="btn primary" id="rd-search">Search Sonarr</button></div>`;
+
+  const sr = sum.sonarr_redownload;
+  const hint = sr && !sr.failed && !sr.interactive ? "" :
+    `<details class="small" style="margin:6px 0 10px;color:var(--warn)"><summary style="cursor:pointer">⚠ ${sr ? "Sonarr will search again by itself — by episode number — when a download fails" : "Check that Sonarr won't search again by itself when a download fails"}</summary>
+      <div style="color:var(--text);margin-top:4px">In Sonarr: <b>Settings → Download Clients → Failed Download Handling</b> (<i>Show Advanced</i>), turn off
+      <b>Redownload Failed</b> and <b>Redownload Failed from Interactive Search</b>${sr ? ` (now ${sr.failed ? "on" : "off"} / ${sr.interactive ? "on" : "off"})` : ""}.
+      Its search goes by episode number, which grabs the wrong episodes for shows numbered differently. These are global settings — turn them back on later if you like.</div></details>`;
+
+  const pickTab = tab || state.rdTab || (results.length ? "choose" : Object.keys(req).length ? "downloads" : "search");
+  const nActive = Object.values(req).filter((r) => r.status === "waiting").length;
+  const tabs = [["downloads", `Downloads${nActive ? ` (${nActive} active)` : ""}`], ["choose", `Choose releases${results.length ? ` (${results.length})` : ""}`],
+    ["search", `Search${damaged.length + missing.length ? ` (${damaged.length + missing.length})` : ""}`]];
+  const box = modal(`<div class="row" style="align-items:flex-start"><h2 style="margin:0">Re-download</h2>
+      <span class="muted small" style="margin:6px 0 0 10px">damaged files &amp; missing episodes, chosen by episode title</span>
+      <div class="spacer"></div><button class="btn small" id="rd-x" aria-label="Close">✕</button></div>
+    <details class="small muted" style="margin-top:4px"><summary style="cursor:pointer">How this works</summary>
+      Sonarr's own search goes by episode number, which brings back the wrong episodes when releases are numbered differently.
+      EpisodeID has Sonarr search the whole season (nothing is grabbed), then picks the releases whose names carry the episode title.
+      Grabbing one tells Sonarr which episode(s) it holds, so Sonarr downloads, imports and names it as those. A damaged file moves to
+      the backup folder (<span class="mono">damaged/</span>) so Sonarr takes the new copy. New files are scanned and checked for damage when imported.</details>
+    ${hint}
+    <div class="tabs" style="margin:8px 0 12px">${tabs.map(([k, l]) => `<a href="#" class="rd-tab ${k === pickTab ? "active" : ""}" data-t="${k}">${l}</a>`).join("")}</div>
+    <div id="rd-body">${pickTab === "downloads" ? downloadsHtml : pickTab === "choose" ? chooseHtml : searchHtml}</div>`, { sticky: true });
   $("#modal-box").style.width = "min(1000px, 100%)";
-  const close = () => closeModal();
-  $("#rd-x", box).onclick = close; $("#rd-c", box).onclick = close;
-  const count = () => { const n = $$(".rd-pick", box).filter((c) => c.checked).length; const el = $("#rd-n", box); if (el) el.textContent = `${n} release${n === 1 ? "" : "s"} selected`; const g = $("#rd-grab", box); if (g) g.disabled = !n; };
+  state.rdTab = pickTab;
+  const reopen = (t) => { closeModal(); redownloadDialog(t); };
+  $("#rd-x", box).onclick = () => { state.rdTab = null; clearTimeout(state.rdTimer); closeModal(); };
+  // Downloads in progress: refresh every 15 s while this tab is showing (not while an
+  // attempts list is unfolded, so it doesn't snap shut under the mouse)
+  clearTimeout(state.rdTimer);
+  if (pickTab === "downloads" && nActive) {
+    const tick = () => {
+      if (!document.body.contains(box) || !$("#rd-body", box)) return;  // dialog closed
+      if ($$("details[open]", $("#rd-body", box)).length) { state.rdTimer = setTimeout(tick, 15000); return; }
+      reopen("downloads");
+    };
+    state.rdTimer = setTimeout(tick, 15000);
+  }
+  $$(".rd-tab", box).forEach((a) => a.onclick = (e) => { e.preventDefault(); state.rdTab = a.dataset.t; reopen(a.dataset.t); });
+  $$(".rd-f", box).forEach((b) => b.onclick = () => { state.rdFilter = b.dataset.f; reopen("downloads"); });
+  const clr = $("#rd-clear", box);
+  if (clr) clr.onclick = async () => {
+    try { const r = await api(`/api/series/${s.id}/redownload/clear`, { method: "POST" }); toast(`Cleared ${r.cleared}`); reopen("downloads"); }
+    catch (e) { fail(e); }
+  };
+  const tickAll = (on) => $$(".rd-file, .rd-miss", box).forEach((c) => c.checked = on);
+  const ra = $("#rd-all", box), rn = $("#rd-none", box);
+  if (ra) ra.onclick = (e) => { e.preventDefault(); tickAll(true); };
+  if (rn) rn.onclick = (e) => { e.preventDefault(); tickAll(false); };
+  const count = () => { const n = new Set($$(".rd-pick", box).filter((c) => c.checked).map((c) => c.dataset.guid)).size;
+    const el = $("#rd-n", box); if (el) el.textContent = `${n} release${n === 1 ? "" : "s"} selected`;
+    const g = $("#rd-grab", box); if (g) g.disabled = !n; };
   $$(".rd-pick", box).forEach((c) => c.onchange = count); count();
   $$(".rd-back", box).forEach((b) => b.onclick = async () => {
     if (!confirm("Move the damaged file back from the backup folder? (Cancel the download in Sonarr too, if it's still going.)")) return;
     b.disabled = true;
     try {
       const r = await api(`/api/series/${s.id}/redownload/put-back`, { method: "POST", body: { rel: b.dataset.rel } });
-      toast(r.note); closeModal(); state.series = await api(`/api/series/${s.id}`); redownloadDialog();
+      toast(r.note); state.series = await api(`/api/series/${s.id}`); reopen("downloads");
     } catch (e) { fail(e); b.disabled = false; }
   });
-  $("#rd-search", box).onclick = () => {
+  const sb = $("#rd-search", box);
+  if (sb) sb.onclick = () => {
     const files = $$(".rd-file", box).filter((c) => c.checked).map((c) => c.value);
     const missingCodes = $$(".rd-miss", box).filter((c) => c.checked).map((c) => c.value);
     if (!files.length && !missingCodes.length) return toast("Tick at least one file or episode");
-    close(); startJob("find_releases", { files, missing: missingCodes });
+    state.rdTab = "choose"; closeModal(); startJob("find_releases", { files, missing: missingCodes });
     toast("Searching Sonarr — open Re-download… again when the job is done.");
   };
   const g = $("#rd-grab", box);
@@ -800,15 +899,9 @@ async function redownloadDialog() {
     g.disabled = true; g.textContent = "Grabbing…";
     try {
       const r = await api(`/api/series/${s.id}/redownload`, { method: "POST", body: { picks, auto_retry: $("#rd-retry", box).checked } });
-      closeModal();
-      modal(`<h2 style="margin-top:0">Sent to Sonarr</h2>
-        ${r.grabbed.length ? `<p>${r.grabbed.length} release${r.grabbed.length === 1 ? "" : "s"} grabbed:</p><ul class="small">${r.grabbed.map((x) =>
-          `<li class="mono">${esc(x.title)} <span class="muted">→ ${x.override ? esc(x.episodes.join(", ")) : "as Sonarr names it"}</span></li>`).join("")}</ul>` : ""}
-        ${r.moved.length ? `<p class="small">${r.moved.length} damaged file${r.moved.length === 1 ? "" : "s"} moved to the backup folder (<span class="mono">damaged/</span>); Sonarr is rescanning the series.</p>` : ""}
-        ${r.failed.length ? `<p style="color:var(--bad)">Not done:</p><ul class="small">${r.failed.map((x) => `<li>${esc(x.title || x.rel)}: ${esc(x.error)}</li>`).join("")}</ul>` : ""}
-        <p class="small muted">Follow the downloads in Sonarr's Activity. Each new file is scanned and checked when Sonarr imports it (needs the import webhook).</p>
-        <div class="row"><div class="spacer"></div><button class="btn" onclick="closeModal()">Close</button></div>`);
-      state.series = await api(`/api/series/${s.id}`); tabPlan();
+      if (r.failed.length) toast(`${r.grabbed.length} grabbed, ${r.failed.length} not — see Downloads`, 8000);
+      else toast(`${r.grabbed.length} grabbed`);
+      state.series = await api(`/api/series/${s.id}`); state.rdFilter = "all"; reopen("downloads"); tabPlan();
     } catch (e) { fail(e); g.disabled = false; g.textContent = "Grab selected"; }
   };
 }

@@ -16,6 +16,11 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Which build this is — shown next to the version in the web UI's header (set by CI;
+# placed here so changing it doesn't throw away the pip layer above).
+ARG GIT_SHA=""
+ARG BUILD_DATE=""
+ENV EPISODEID_COMMIT=$GIT_SHA EPISODEID_BUILT=$BUILD_DATE
 COPY app ./app
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

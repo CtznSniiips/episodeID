@@ -78,10 +78,31 @@ def _404(what="Not found"):
 
 # ------------------------------------------------------------------ settings
 
+_BUILD: dict = {}
+
+
+def _build_info() -> dict:
+    """Which build is running: the commit and build time CI stamps into the image, or —
+    for an image built by hand — when its newest app file was last changed."""
+    if not _BUILD:
+        import os
+        commit = (os.environ.get("EPISODEID_COMMIT") or "").strip()
+        built = (os.environ.get("EPISODEID_BUILT") or "").strip()
+        if not built:
+            from datetime import datetime, timezone
+            here = Path(__file__).resolve().parent
+            newest = max((f.stat().st_mtime for f in here.rglob("*") if f.is_file()
+                          and f.suffix in (".py", ".js", ".css", ".html")), default=0)
+            built = datetime.fromtimestamp(newest, timezone.utc).isoformat(timespec="seconds") if newest else ""
+        _BUILD.update(commit=commit[:7] or None, built=built or None,
+                      source="ci" if os.environ.get("EPISODEID_BUILT") else "files")
+    return _BUILD
+
+
 @app.get("/api/status")
 def status():
     s = get_settings()
-    return {"version": __version__, "media_root": str(MEDIA_ROOT),
+    return {"version": __version__, "build": _build_info(), "media_root": str(MEDIA_ROOT),
             "tvdb": bool(s["tvdb_api_key"]), "opensubtitles": bool(s["opensubtitles_api_key"]),
             "llm": llm.available(), "whisper": s["whisper_enabled"],
             "titlecards": bool(s["titlecard_enabled"] and titlecard.available()),
@@ -880,6 +901,12 @@ def redownload_get(sid: int):
 
 class PutBack(BaseModel):
     rel: str
+
+
+@app.post("/api/series/{sid}/redownload/clear")
+def redownload_clear(sid: int):
+    s = db.get_series(sid) or _404()
+    return {"cleared": redownload.clear_finished(s)}
 
 
 @app.post("/api/series/{sid}/redownload/put-back")

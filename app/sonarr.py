@@ -200,3 +200,13 @@ def rescan(sonarr_series_id: int) -> None:
 def history_since(date_iso: str) -> list[dict]:
     """Sonarr's history from that moment on (grabs, imports, failed downloads)."""
     return _get("history/since", date=date_iso) or []
+
+
+def queue(sonarr_series_id: int | None = None) -> list[dict]:
+    """Sonarr's download queue (what the download client is working on), for one series."""
+    params = {"page": 1, "pageSize": 1000, "includeEpisode": "false"}
+    if sonarr_series_id:
+        params["seriesIds"] = sonarr_series_id
+    data = _get("queue", **params) or {}
+    recs = data.get("records", data) if isinstance(data, dict) else data
+    return [r for r in recs or [] if not sonarr_series_id or r.get("seriesId") in (None, sonarr_series_id)]
