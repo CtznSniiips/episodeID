@@ -132,7 +132,7 @@ def preselect(want: list[str], cands: list[dict]) -> list[str]:
     """guids to tick: the best titled release(s) covering every wanted episode."""
     left, picked = set(want), []
     for c in cands:
-        if c["kind"] != "title" or c["hard_rejections"]:
+        if c["kind"] != "title" or c["hard_rejections"] or c.get("imported_before"):
             continue
         if left & set(c["covers"]):
             picked.append(c["guid"])
@@ -146,6 +146,29 @@ def preselect(want: list[str], cands: list[dict]) -> list[str]:
 
 def _state_file(sid: int) -> Path:
     return CONFIG_DIR / "redownload" / f"{sid}.json"
+
+
+def _remember_imports(st: dict) -> None:
+    """Keep every release a re-download imported, by name, with the episodes it was for —
+    kept after "Clear finished", so a later re-download of those episodes doesn't pick it
+    again (it was imported once and the episode needed re-downloading anyway)."""
+    mem = st.setdefault("imported_releases", {})
+    for r in (st.get("requested") or {}).values():
+        if not isinstance(r, dict):
+            continue
+        for g in r.get("grabs") or []:
+            if isinstance(g, dict) and g.get("status") == "imported" and g.get("title"):
+                m = mem.setdefault(_norm(g["title"]), {"title": g["title"], "episodes": [], "at": g.get("done_at") or g.get("at")})
+                m["episodes"] = sorted(set(m["episodes"]) | set(g.get("episodes") or []))
+
+
+def imported_before(st: dict, c: dict) -> str | None:
+    """When this release was imported before for any of the episodes it would be grabbed
+    for (None if never)."""
+    m = (st.get("imported_releases") or {}).get(_norm(c.get("title")))
+    if m and set(m["episodes"]) & set((c.get("covers") or []) + (c.get("extra") or []) + (c.get("fills") or [])):
+        return m.get("at") or "earlier"
+    return None
 
 
 def load_state(sid: int) -> dict:
@@ -175,10 +198,12 @@ def load_state(sid: int) -> dict:
             if fix and req[rel].get("status") in ("failed", "partly imported"):
                 req[rel]["status"] = "waiting"
                 req[rel]["recheck_only"] = True
+    _remember_imports(st)
     return st
 
 
 def _save_state(sid: int, st: dict) -> None:
+    _remember_imports(st)
     f = _state_file(sid)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(st))
@@ -243,10 +268,15 @@ def job_find_releases(ctx, params):
             releases[sn] = []
         ctx.log(f"Season {sn}: {len(releases[sn])} releases.")
     files = {}
+    prev = load_state(series["id"])
     for rel, codes in want.items():
         pool = [r for sn in {int(c[1:3]) for c in codes} for r in releases.get(sn, [])]
         cands = candidates(codes, pool, eps, series["name"], _quality_of(rel) if not rel.startswith(MISSING) else
                            _usual_quality(series), fill=set(missing))
+        for c in cands:
+            if imported_before(prev, c):
+                c["imported_before"] = imported_before(prev, c)
+        cands.sort(key=lambda c: bool(c.get("imported_before")))  # stable: otherwise best first
         pick = preselect(codes, cands)
         titled = sum(1 for c in cands if c["kind"] == "title")
         files[rel] = {"want": [{"code": c, "title": titles.get(c)} for c in codes], "missing": rel.startswith(MISSING),
@@ -299,7 +329,7 @@ def _fresh_release(c: dict, episode_ids: list[int]) -> dict | None:
 
 def _keep(c: dict) -> dict:
     return {k: c.get(k) for k in ("guid", "title", "kind", "covers", "extra", "fills", "mapped", "release",
-                                  "hard_rejections", "quality", "size")}
+                                  "hard_rejections", "quality", "size", "imported_before")}
 
 
 def grab(series: dict, picks: list[dict], ctx_log=None, auto_retry: bool = True) -> dict:
@@ -528,7 +558,7 @@ def follow_up(series: dict, log=None) -> int:
         elif recheck:
             r["status"] = "failed"  # looked at again after an update: no new attempts started
         else:
-            nxt = _retry(r, st.get("sonarr_series_id"), log, rel) if r.get("auto_retry") else None
+            nxt = _retry(r, st.get("sonarr_series_id"), log, rel, st) if r.get("auto_retry") else None
             if nxt:
                 continue  # trying the next release: the damaged file stays in the backup folder
             r["status"] = "failed"
@@ -695,7 +725,7 @@ def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool
     return True
 
 
-def _retry(r: dict, sid: int | None, log, rel: str) -> dict | None:
+def _retry(r: dict, sid: int | None, log, rel: str, st: dict | None = None) -> dict | None:
     """Every grab for this file failed: grab its next release whose name carries the
     episode title(s) — covering what the failed ones were for, holding no other episode —
     unless MAX_ATTEMPTS have been tried. Returns the new grab, or None."""
@@ -715,7 +745,7 @@ def _retry(r: dict, sid: int | None, log, rel: str) -> dict | None:
         return None
     for c in r.get("candidates") or []:
         if c["guid"] in tried or _norm(c["title"]) in tried_titles or c["kind"] != "title" or c.get("extra") \
-                or c.get("hard_rejections") or not need <= set(c["covers"]):
+                or c.get("hard_rejections") or c.get("imported_before") or (st and imported_before(st, c)) or not need <= set(c["covers"]):
             continue
         tried.add(c["guid"])
         try:

@@ -815,6 +815,7 @@ async function redownloadDialog(tab, cached, refresh = false) {
         <div style="flex:1;min-width:0">${kindBadge[c.kind] || ""} <span class="mono" style="word-break:break-all">${esc(c.title)}</span>
           <div class="muted">${esc([c.quality, fmtSize(c.size), c.indexer].filter(Boolean).join(" · "))}${c.extra.length ? ` · <span style="color:var(--warn)">also holds ${esc(c.extra.join(", "))}</span>` : ""}${(c.fills || []).length ? ` · <span style="color:var(--ok)">also fills ${esc(c.fills.join(", "))}</span>` : ""}${c.covers.length < f.want.length && c.kind === "title" ? ` · only ${esc(c.covers.join(", "))}` : ""}${c.kind === "title" && (c.mapped || []).length && [...c.mapped].sort().join() !== [...c.covers, ...c.extra, ...(c.fills || [])].sort().join() ? ` · numbered ${esc(c.mapped.join(", "))} in its name` : ""}</div>
           ${c.hard_rejections.length ? `<div style="color:var(--bad)">Sonarr: ${esc(c.hard_rejections.join("; "))}</div>` : ""}
+          ${c.imported_before ? `<div style="color:var(--warn)">imported before for ${esc([...c.covers, ...(c.fills || [])].join(", "))}${/^\d{4}-/.test(c.imported_before) ? ` (${esc(new Date(c.imported_before).toLocaleDateString())})` : ""} — and needed re-downloading again, so not ticked</div>` : ""}
         </div></label>`).join("") : `<div class="small muted" style="margin-top:6px">No releases found.</div>`}
     </details>`).join("")}</div>
     <label class="small" style="display:block;margin-top:8px"><input type="checkbox" id="rd-retry" checked>

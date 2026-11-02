@@ -588,3 +588,21 @@ HIST[:] = [{"eventType": "downloadFolderImported", "episodeId": e, "sourceTitle"
 r = run(redownload.load_state(sid)["requested"])
 assert r["damaged.mkv"]["status"] == "imported", r
 print("PASS (same release imported under another download: done; name alone isn't 'in the queue')")
+
+# --- a release imported before for these episodes isn't picked again (even after Clear finished)
+st = redownload.load_state(sid)
+st["requested"] = {"x.mkv": {"status": "imported", "grabs": [{"title": "Show.S02E04E05.The.Fridge.+.The.Flower.1080p.WEB-DL",
+                                                               "guid": "g-pair", "episodes": ["S02E04", "S02E05"],
+                                                               "status": "imported", "done_at": "2026-11-01T10:00:00+00:00"}]}}
+redownload._save_state(sid, st)
+assert c.post(f"/api/series/{sid}/redownload/clear").json()["cleared"] == 1
+assert "showS02E04E05TheFridgeTheFlower1080pWEBDL".lower() in redownload.load_state(sid)["imported_releases"]
+(root / bad).write_bytes(b"m" * 1000)
+redownload.job_find_releases(JobContext(db.add_job("find_releases", sid, {}), sid), {"files": [bad]})
+db.conn().execute("UPDATE jobs SET status='done'")
+f = redownload.load_state(sid)["files"][bad]
+seen_before = [x for x in f["candidates"] if x.get("imported_before")]
+assert {x["guid"] for x in seen_before} >= {"g-pair", "g-pair-other-indexer"}, seen_before  # same name, any indexer
+assert f["preselect"] and "g-pair" not in f["preselect"] and "g-pair-other-indexer" not in f["preselect"], f["preselect"]
+assert f["candidates"][-1].get("imported_before"), "ranked last"
+print("PASS (releases imported before: flagged, ranked last, not ticked — kept after Clear finished)")
