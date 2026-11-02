@@ -590,6 +590,10 @@ AUTO_IMPORT_EVERY = 10 * 60
 _VIDEO = re.compile(r"(?i)\.(mkv|mp4|m4v|avi|ts|wmv|webm)$")
 
 
+def _norm_path(p: str | None) -> str:
+    return (p or "").replace("\\", "/").rstrip("/").lower()
+
+
 def _import_blocked(item: dict) -> bool:
     """Downloaded, but Sonarr won't import it by itself (usually: the name's episode
     numbers aren't the episodes it was grabbed as) — it needs a Manual Import."""
@@ -610,13 +614,19 @@ def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool
     if not ids:
         ai.update(note="not imported automatically: which episodes it holds wasn't recorded")
         return False
-    ai.update(tries=ai.get("tries", 0) + 1, at=db.now())
+    ai.update(at=db.now())  # tries are counted when an import is sent
     try:
-        files = [f for f in sonarr.manual_import_files(g["download_id"], sid)
+        files = [f for f in sonarr.manual_import_files(g["download_id"])
                  if _VIDEO.search(f.get("path") or "") and "sample" not in (f.get("name") or f.get("path") or "").lower()]
     except sonarr.SonarrError as e:
         ai.update(note=f"couldn't read the download's files: {e}"[:200])
         return False
+    # only files inside the download itself — never anything from the library
+    out = _norm_path(item.get("outputPath"))
+    if not out:
+        ai.update(note="not imported automatically: Sonarr doesn't say where the download is")
+        return False
+    files = [f for f in files if _norm_path(f.get("path")) == out or _norm_path(f.get("path")).startswith(out + "/")]
     if not files:
         ai.update(note="Sonarr lists no video file in the download")
         return False
@@ -626,6 +636,13 @@ def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool
     except sonarr.SonarrError:
         pass
     if len(files) == 1:
+        # a file whose name carries another episode's title isn't what was grabbed
+        named = titles_in_release(files[0].get("name") or Path(files[0].get("path") or "").name,
+                                  series.get("episodes") or [], series.get("name") or "")
+        if named and not {by_code.get(c) for c in named} <= set(ids):
+            ai.update(note=f"not imported automatically: {Path(files[0].get('path') or '').name} "
+                           f"names {', '.join(named)}, not the episodes it was grabbed for")
+            return False
         plan = [(files[0], ids)]
     else:
         plan, covered = [], set()
@@ -650,6 +667,7 @@ def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool
              "indexerFlags": f.get("indexerFlags") or 0, "releaseType": f.get("releaseType"),
              "downloadId": g["download_id"]}
         body.append({k: v for k, v in x.items() if v is not None})
+    ai.update(tries=ai.get("tries", 0) + 1)
     try:
         sonarr.manual_import(body)
     except sonarr.SonarrError as e:

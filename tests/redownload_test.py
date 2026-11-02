@@ -502,10 +502,11 @@ print("PASS (stuck only when still in Sonarr's queue after 2 days)")
 GOT = []
 sonarr.manual_import = lambda files: GOT.append(files)
 MI = {}
-sonarr.manual_import_files = lambda did, sid=None: list(MI.get(did, []))
+sonarr.manual_import_files = lambda did: list(MI.get(did, []))
 HAS.clear()
+OUT = {"ONE": "/dl/Show.S02E04.The.Flower.1080p", "TWO": "/dl/p", "ODD": "/dl/o", "LIB": "/dl/lib"}
 blocked = lambda did: {"downloadId": did, "title": "x", "status": "completed", "trackedDownloadState": "importBlocked",  # noqa: E731
-                       "trackedDownloadStatus": "warning"}
+                       "trackedDownloadStatus": "warning", "outputPath": OUT.get(did)}
 QUEUE[:] = [blocked("ONE"), blocked("TWO"), blocked("ODD")]
 MI["ONE"] = [{"path": "/dl/Show.S02E04.The.Flower.1080p/Show.S02E04.The.Flower.1080p.mkv", "folderName": "Show.S02E04.The.Flower.1080p",
               "name": "Show.S02E04.The.Flower.1080p", "quality": {"quality": {"name": "WEBDL-1080p"}},
@@ -541,3 +542,13 @@ QUEUE[:] = []; HAS.add(1205)  # …and once Sonarr has it, it's done
 r = run(redownload.load_state(sid)["requested"])
 assert r["one"]["status"] == "imported", r["one"]
 print("PASS (stuck: looked at again, fixed, then done)")
+
+# Never a library file: one outside the download is ignored; a lone file naming another episode is refused
+GOT.clear()
+QUEUE[:] = [blocked("ONE"), blocked("LIB")]
+MI["ONE"] = MI["ONE"] + [{"path": "/tv/Show/Season 5/Show - S05E03 - The Guy.mkv", "name": "Show - S05E03 - The Guy"}]
+MI["LIB"] = [{"path": "/dl/lib/Show.S02E05.The.Pest.mkv", "name": "Show.S02E05.The.Pest"}]
+r = run({"one": one("S02E05", 1205, "ONE"), "lib": one("S02E05", 1205, "LIB")})
+assert len(GOT) == 1 and len(GOT[0]) == 1 and GOT[0][0]["path"].endswith("The.Flower.1080p.mkv"), GOT
+assert "names S04E07" in r["lib"]["grabs"][0]["auto_import"]["note"], r["lib"]
+print("PASS (only the download's own files; a file naming another episode is refused)")

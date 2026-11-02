@@ -202,13 +202,11 @@ def history_since(date_iso: str) -> list[dict]:
     return _get("history/since", date=date_iso) or []
 
 
-def manual_import_files(download_id: str, sonarr_series_id: int | None = None) -> list[dict]:
+def manual_import_files(download_id: str) -> list[dict]:
     """The files of a finished download as Sonarr's Manual Import dialog lists them (path,
-    quality, languages, release group, what Sonarr thinks they are, rejections)."""
-    params = {"downloadId": download_id, "filterExistingFiles": "false"}
-    if sonarr_series_id:
-        params["seriesId"] = sonarr_series_id
-    return _get("manualimport", timeout=120, **params) or []
+    quality, languages, release group, what Sonarr thinks they are, rejections).
+    No seriesId: with one, Sonarr lists the series folder's unmapped files instead."""
+    return _get("manualimport", timeout=120, downloadId=download_id, filterExistingFiles="false") or []
 
 
 def manual_import(files: list[dict]) -> None:
