@@ -911,6 +911,18 @@ def redownload_clear(sid: int):
     return {"cleared": redownload.clear_finished(s)}
 
 
+class AcceptPlayback(BaseModel):
+    rel: str
+    undo: bool = False
+
+
+@app.post("/api/series/{sid}/integrity/accept")
+def integrity_accept(sid: int, body: AcceptPlayback):
+    from . import integrity
+    s = db.get_series(sid) or _404()
+    return integrity.accept(s, body.rel, body.undo)
+
+
 @app.post("/api/series/{sid}/redownload/put-back")
 def redownload_put_back(sid: int, body: PutBack):
     s = db.get_series(sid) or _404()

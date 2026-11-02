@@ -599,6 +599,15 @@ async function tabPlan(reload = true) {
   }
   $$("button.set-ep", tab).forEach((b) => b.onclick = () => setEpisodeDialog(b.dataset.src, b.dataset.cur));
   $$("button.card-check", tab).forEach((b) => b.onclick = () => cardCheckDialog(b.dataset.src));
+  $$(".int-accept", tab).forEach((b) => b.onclick = async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/api/series/${state.series.id}/integrity/accept`, { method: "POST",
+        body: { rel: b.dataset.rel, undo: !!b.dataset.undo } });
+      state.series = await api(`/api/series/${state.series.id}`);
+      tabPlan();
+    } catch (err) { fail(err); }
+  });
   $$("button.ai-check", tab).forEach((b) => b.onclick = () => { startJob("ai_check", { source: b.dataset.src }); toast("Asking the AI — see the job log; the plan updates when it answers."); });
   $$("button.cut-pick", tab).forEach((b) => b.onclick = () =>
     cutDialog(plan, plan.items.find((x) => String(x.id) === b.dataset.iid)));
@@ -693,7 +702,12 @@ function integrityBadge(it) {
 
 function integrityNote(it) {
   // the example ffmpeg message is in the badge's tooltip; the row keeps it short
-  return integrityOf(it).map((r) => `<div class="small" style="color:var(--${r.status === "bad" ? "bad" : "warn"})">${esc(r.summary.replace(/ — e\.g\. “[^”]*”/, ""))}${r.status === "bad" ? " — re-download it in Sonarr" : ""}</div>`).join("");
+  const integ = state.series.integrity_files || {};
+  const accepted = (it.sources || [it.source]).filter((p) => integ[p] && integ[p].accepted)
+    .map((p) => `<div class="small muted">playback marked OK by you (${esc(integ[p].summary.replace(/ — e\.g\. “[^”]*”/, ""))})
+      · <a href="#" class="int-accept" data-rel="${esc(p)}" data-undo="1">undo</a></div>`).join("");
+  return integrityOf(it).map((r) => `<div class="small" style="color:var(--${r.status === "bad" ? "bad" : "warn"})">${esc(r.summary.replace(/ — e\.g\. “[^”]*”/, ""))}${r.status === "bad" ? " — re-download it in Sonarr" : ""}
+    <button class="btn small int-accept" data-rel="${esc(r.rel)}" style="margin-left:6px" title="You've checked it plays fine: stop flagging this file (until it's replaced)">Mark OK</button></div>`).join("") + accepted;
 }
 
 // Re-download damaged files: search Sonarr's indexers for the season, pick releases by

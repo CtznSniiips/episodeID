@@ -233,9 +233,37 @@ def _save_state(sid: int, st: dict) -> None:
     f.write_text(json.dumps(st))
 
 
+def accept(series: dict, rel: str, undo: bool = False) -> dict:
+    """Mark a file's playback warning as fine (you've watched it): it counts as OK from
+    now on. Tied to the file itself (size and date), so it follows renames and drops off
+    if the file is replaced."""
+    p = Path(series["path"]) / rel
+    if not p.is_file():
+        return {"ok": False, "note": "file not found"}
+    st = load_state(series["id"])
+    acc = st.setdefault("accepted", {})
+    key = _key(p)
+    if undo:
+        acc.pop(key, None)
+    else:
+        acc[key] = {"rel": rel, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _save_state(series["id"], st)
+    return {"ok": True}
+
+
 def current(series: dict) -> dict:
     """{rel: result} for the series' files as they are now: results for files that were
-    renamed (same size and date) follow them; replaced or removed files drop out."""
+    renamed (same size and date) follow them; replaced or removed files drop out. Files
+    you marked as fine count as "ok" (with accepted, and their checked status kept as was)."""
+    out = _current(series)
+    acc = load_state(series["id"]).get("accepted") or {}
+    for rel, v in out.items():
+        if v.get("key") in acc and v.get("status") != "ok":
+            out[rel] = {**v, "was": v["status"], "status": "ok", "accepted": acc[v["key"]].get("at")}
+    return out
+
+
+def _current(series: dict) -> dict:
     st = load_state(series["id"])
     if not st.get("files"):
         return {}
