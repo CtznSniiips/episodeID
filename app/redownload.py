@@ -429,6 +429,15 @@ def follow_up(series: dict, log=None) -> int:
     log = log or (lambda m: None)
     st = load_state(series["id"])
     req = st.get("requested") or {}
+    # "stuck" ones are looked at again each time: a blocked import may now be fixable, or
+    # the download may have left Sonarr's queue. Still sitting there, they're stuck again.
+    for r in req.values():
+        if r.get("status") == "stuck":
+            r.update(status="waiting", was_stuck=True)
+            for g in r.get("grabs") or []:
+                if g.get("status") == "stuck":
+                    g.update(status="waiting", was_stuck=True)
+                    g.pop("reason", None)
     waiting = [(rel, g) for rel, r in req.items() if r.get("status") == "waiting"
                for g in r.get("grabs") or [] if g.get("status") == "waiting"]
     if not waiting:
@@ -487,11 +496,11 @@ def follow_up(series: dict, log=None) -> int:
                 changed += 1
                 continue
     # what has left Sonarr's queue is settled first, so "stuck" only means still sitting there
-    changed += _reconcile_with_queue(st, [g for _rel, g in waiting if g.get("status") == "waiting"], log)
+    changed += _reconcile_with_queue(series, st, [g for _rel, g in waiting if g.get("status") == "waiting"], log)
     for _rel, g in waiting:
         if _age(g["at"]) > STUCK_AFTER and g.get("status") == "waiting":
             g.update(status="stuck", reason="not imported after 2 days — check Sonarr's Activity queue")
-            changed += 1
+            changed += 0 if g.get("was_stuck") else 1
     for rel, r in req.items():
         if r.get("status") != "waiting":
             continue
@@ -508,7 +517,8 @@ def follow_up(series: dict, log=None) -> int:
                 f"{rel}: only some replacements imported — the damaged file stays in the backup folder")
         elif "stuck" in states:
             r["status"] = "stuck"
-            log(f"{rel}: replacement not imported after 2 days — check Sonarr's Activity queue")
+            if not r.get("was_stuck"):
+                log(f"{rel}: replacement not imported after 2 days — check Sonarr's Activity queue")
         elif recheck:
             r["status"] = "failed"  # looked at again after an update: no new attempts started
         else:
@@ -527,7 +537,7 @@ def follow_up(series: dict, log=None) -> int:
     return changed
 
 
-def _reconcile_with_queue(st: dict, waiting: list[dict], log) -> int:
+def _reconcile_with_queue(series: dict, st: dict, waiting: list[dict], log) -> int:
     """Sonarr's history doesn't always say how a download ended: one removed from the queue
     (or from the download client) without blocklisting leaves no event, and a manual import
     may not carry the download id. So a grab Sonarr took that has left its queue is over:
@@ -550,6 +560,10 @@ def _reconcile_with_queue(st: dict, waiting: list[dict], log) -> int:
     for g in seen:
         if g["download_id"] in in_q_ids or _norm(g.get("title")) in in_q_titles:
             g.pop("gone_since", None)
+            item = next((x for x in q if x.get("downloadId") == g["download_id"]), None) or \
+                next((x for x in q if _norm(x.get("title")) == _norm(g.get("title"))), None)
+            if item and _import_blocked(item):
+                _fix_import(series, sid, g, item, log)
             continue
         ids = set(g.get("episode_ids") or [])
         if ids and ids <= have:
@@ -569,6 +583,83 @@ def _reconcile_with_queue(st: dict, waiting: list[dict], log) -> int:
             log(f"{g.get('title')}: no longer in Sonarr's queue and never imported")
             changed += 1
     return changed
+
+
+AUTO_IMPORT_TRIES = 3
+AUTO_IMPORT_EVERY = 10 * 60
+_VIDEO = re.compile(r"(?i)\.(mkv|mp4|m4v|avi|ts|wmv|webm)$")
+
+
+def _import_blocked(item: dict) -> bool:
+    """Downloaded, but Sonarr won't import it by itself (usually: the name's episode
+    numbers aren't the episodes it was grabbed as) — it needs a Manual Import."""
+    state = item.get("trackedDownloadState")
+    return state == "importBlocked" or (state == "importPending" and item.get("trackedDownloadStatus") == "warning")
+
+
+def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool:
+    """Do the Manual Import Sonarr is waiting for: import the download's file(s) as the
+    episodes EpisodeID grabbed it for (chosen by the titles in its name), whatever
+    numbers the name carries. One file → the grab's episodes. Several → each file's
+    episodes from the titles in its own name, which must cover the grab exactly.
+    Notes the outcome on the grab; returns whether an import was sent."""
+    ai = g.setdefault("auto_import", {"tries": 0})
+    if ai.get("tries", 0) >= AUTO_IMPORT_TRIES or (ai.get("at") and _age(ai["at"]) < AUTO_IMPORT_EVERY):
+        return False
+    ids = list(g.get("episode_ids") or [])
+    if not ids:
+        ai.update(note="not imported automatically: which episodes it holds wasn't recorded")
+        return False
+    ai.update(tries=ai.get("tries", 0) + 1, at=db.now())
+    try:
+        files = [f for f in sonarr.manual_import_files(g["download_id"], sid)
+                 if _VIDEO.search(f.get("path") or "") and "sample" not in (f.get("name") or f.get("path") or "").lower()]
+    except sonarr.SonarrError as e:
+        ai.update(note=f"couldn't read the download's files: {e}"[:200])
+        return False
+    if not files:
+        ai.update(note="Sonarr lists no video file in the download")
+        return False
+    by_code = {}
+    try:
+        by_code = {_code(e["seasonNumber"], e["episodeNumber"]): e["id"] for e in sonarr.episodes(sid)}
+    except sonarr.SonarrError:
+        pass
+    if len(files) == 1:
+        plan = [(files[0], ids)]
+    else:
+        plan, covered = [], set()
+        for f in files:
+            codes = titles_in_release(f.get("name") or Path(f.get("path") or "").name,
+                                      series.get("episodes") or [], series.get("name") or "")
+            fids = [by_code[c] for c in codes if c in by_code]
+            if not fids or not set(fids) <= set(ids) or covered & set(fids):
+                ai.update(note=f"not imported automatically: can't tell which episode "
+                               f"{Path(f.get('path') or '').name} is from its name")
+                return False
+            covered |= set(fids)
+            plan.append((f, fids))
+        if covered != set(ids):
+            ai.update(note="not imported automatically: the files don't cover the episodes it was grabbed for")
+            return False
+    body = []
+    for f, fids in plan:
+        x = {"path": f.get("path"), "folderName": f.get("folderName"), "seriesId": sid or (f.get("series") or {}).get("id"),
+             "episodeIds": fids, "releaseGroup": f.get("releaseGroup"), "quality": f.get("quality"),
+             "languages": f.get("languages"), "language": f.get("language"),  # v4 / v3
+             "indexerFlags": f.get("indexerFlags") or 0, "releaseType": f.get("releaseType"),
+             "downloadId": g["download_id"]}
+        body.append({k: v for k, v in x.items() if v is not None})
+    try:
+        sonarr.manual_import(body)
+    except sonarr.SonarrError as e:
+        ai.update(note=f"Sonarr refused the import: {e}"[:200])
+        log(f"{g.get('title')}: automatic import refused — {e}")
+        return False
+    names = ", ".join(c for c, i in by_code.items() if i in ids) or "its episodes"
+    ai.update(note=f"import was blocked — EpisodeID imported it as {names}", sent=True)
+    log(f"{g.get('title')}: Sonarr's import was blocked; imported it as {names}")
+    return True
 
 
 def _retry(r: dict, sid: int | None, log, rel: str) -> dict | None:

@@ -497,3 +497,47 @@ r = run({"imp": one("S02E08", 1208, "OLD_GONE", at_min=3 * 24 * 60),
 assert r["imp"]["status"] == "imported", r["imp"]
 assert r["slow"]["status"] == "stuck" and "2 days" in r["slow"]["grabs"][0]["reason"], r["slow"]
 print("PASS (stuck only when still in Sonarr's queue after 2 days)")
+
+# --- blocked imports: EpisodeID does the Manual Import as the episodes it grabbed for
+GOT = []
+sonarr.manual_import = lambda files: GOT.append(files)
+MI = {}
+sonarr.manual_import_files = lambda did, sid=None: list(MI.get(did, []))
+HAS.clear()
+blocked = lambda did: {"downloadId": did, "title": "x", "status": "completed", "trackedDownloadState": "importBlocked",  # noqa: E731
+                       "trackedDownloadStatus": "warning"}
+QUEUE[:] = [blocked("ONE"), blocked("TWO"), blocked("ODD")]
+MI["ONE"] = [{"path": "/dl/Show.S02E04.The.Flower.1080p/Show.S02E04.The.Flower.1080p.mkv", "folderName": "Show.S02E04.The.Flower.1080p",
+              "name": "Show.S02E04.The.Flower.1080p", "quality": {"quality": {"name": "WEBDL-1080p"}},
+              "languages": [{"id": 1}], "releaseGroup": "VIETNAM", "episodes": [{"id": 1204}]},
+             {"path": "/dl/Show.S02E04.The.Flower.1080p/sample.mkv", "name": "sample"}]
+MI["TWO"] = [{"path": "/dl/p/Show.S02E01.The.Phone.mkv", "name": "Show.S02E01.The.Phone"},
+             {"path": "/dl/p/Show.S02E02.The.Job.mkv", "name": "Show.S02E02.The.Job"}]
+MI["ODD"] = [{"path": "/dl/o/a.mkv", "name": "a"}, {"path": "/dl/o/b.mkv", "name": "b"}]
+two = one("S02E07", 1207, "TWO")
+two["grabs"][0].update(episodes=["S02E07", "S02E08"], episode_ids=[1207, 1208])
+r = run({"one": one("S02E05", 1205, "ONE"), "two": two, "odd": one("S02E09", 1209, "ODD")})
+assert len(GOT) == 2, GOT
+f1 = GOT[0] if GOT[0][0]["downloadId"] == "ONE" else GOT[1]
+assert len(f1) == 1 and f1[0]["episodeIds"] == [1205] and f1[0]["seriesId"] == 9 and f1[0]["releaseGroup"] == "VIETNAM", f1
+f2 = GOT[1] if f1 is GOT[0] else GOT[0]
+assert {tuple(x["episodeIds"]) for x in f2} == {(1207,), (1208,)}, f2  # each file by the title in its name
+assert "imported it as S02E05" in r["one"]["grabs"][0]["auto_import"]["note"], r["one"]
+assert "can't tell which episode" in r["odd"]["grabs"][0]["auto_import"]["note"], r["odd"]
+assert all(r[k]["status"] == "waiting" for k in r), "imported once Sonarr's history says so"
+# not tried again straight away
+GOT.clear()
+run(redownload.load_state(sid)["requested"])
+assert not GOT
+print("PASS (blocked imports: Manual Import as the grabbed episodes)")
+
+# A stuck one sitting blocked in the queue is still fixed
+GOT.clear()
+st_ = one("S02E05", 1205, "ONE", at_min=3 * 24 * 60)
+st_["status"] = "stuck"; st_["grabs"][0].update(status="stuck", reason="not imported after 2 days")
+r = run({"one": st_})
+assert GOT and GOT[0][0]["episodeIds"] == [1205] and r["one"]["status"] == "stuck", (GOT, r)
+QUEUE[:] = []; HAS.add(1205)  # …and once Sonarr has it, it's done
+r = run(redownload.load_state(sid)["requested"])
+assert r["one"]["status"] == "imported", r["one"]
+print("PASS (stuck: looked at again, fixed, then done)")
