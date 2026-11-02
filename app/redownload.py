@@ -280,7 +280,9 @@ def job_find_releases(ctx, params):
         pick = preselect(codes, cands)
         titled = sum(1 for c in cands if c["kind"] == "title")
         files[rel] = {"want": [{"code": c, "title": titles.get(c)} for c in codes], "missing": rel.startswith(MISSING),
-                      "candidates": cands[:MAX_CANDIDATES], "found": len(cands), "titled": titled,
+                      "candidates": [c for c in cands if not c.get("imported_before")][:MAX_CANDIDATES]
+                      + [c for c in cands if c.get("imported_before")],  # kept, to show what was skipped
+                       "found": len(cands), "titled": titled,
                       "preselect": pick}
         ctx.log(f"  {rel}: {titled} release(s) naming "
                 + (" / ".join(f"'{titles.get(c)}'" for c in codes) or "its episodes")
