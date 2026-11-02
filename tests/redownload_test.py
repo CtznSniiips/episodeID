@@ -552,3 +552,18 @@ r = run({"one": one("S02E05", 1205, "ONE"), "lib": one("S02E05", 1205, "LIB")})
 assert len(GOT) == 1 and len(GOT[0]) == 1 and GOT[0][0]["path"].endswith("The.Flower.1080p.mkv"), GOT
 assert "names S04E07" in r["lib"]["grabs"][0]["auto_import"]["note"], r["lib"]
 print("PASS (only the download's own files; a file naming another episode is refused)")
+
+# A release for two missing episodes, recorded (by an older retry) as only one of them:
+# its name carries both titles, so it's imported as both — and once, though two files want it
+GOT.clear()
+QUEUE[:] = [blocked("PAIR")]
+OUT["PAIR"] = "/dl/pair"
+QUEUE[0]["outputPath"] = "/dl/pair"
+MI["PAIR"] = [{"path": "/dl/pair/Show.S02E09-S02E10.Halloween.The.Treasure.1080p.mkv",
+               "name": "Show.S02E09-S02E10.Halloween.The.Treasure.1080p"}]
+a = one("S02E09", 1209, "PAIR"); a["grabs"][0]["title"] = "Show.S02E09-S02E10.Halloween.The.Treasure.1080p"
+b = one("S02E10", 1210, "PAIR"); b["grabs"][0]["title"] = a["grabs"][0]["title"]
+r = run({"missing:S02E09": a, "missing:S02E10": b})
+assert len(GOT) == 1 and sorted(GOT[0][0]["episodeIds"]) == [1209, 1210], GOT
+assert r["missing:S02E10"]["grabs"][0]["auto_import"]["sent"], r
+print("PASS (two-episode release: imported as both, once)")

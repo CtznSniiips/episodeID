@@ -563,7 +563,13 @@ def _reconcile_with_queue(series: dict, st: dict, waiting: list[dict], log) -> i
             item = next((x for x in q if x.get("downloadId") == g["download_id"]), None) or \
                 next((x for x in q if _norm(x.get("title")) == _norm(g.get("title"))), None)
             if item and _import_blocked(item):
-                _fix_import(series, sid, g, item, log)
+                twin = next((x for x in seen if x is not g and x.get("download_id") == g["download_id"]
+                             and (x.get("auto_import") or {}).get("sent")
+                             and _age(x["auto_import"].get("at")) < AUTO_IMPORT_EVERY), None)
+                if twin:  # the same download, already imported for another file
+                    g["auto_import"] = dict(twin["auto_import"])
+                else:
+                    _fix_import(series, sid, g, item, log)
             continue
         ids = set(g.get("episode_ids") or [])
         if ids and ids <= have:
@@ -635,28 +641,33 @@ def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool
         by_code = {_code(e["seasonNumber"], e["episodeNumber"]): e["id"] for e in sonarr.episodes(sid)}
     except sonarr.SonarrError:
         pass
+    eps, sname = series.get("episodes") or [], series.get("name") or ""
+    # what it may be imported as: the episodes it was grabbed for, and those its release
+    # name carries the titles of (a release for two missing episodes holds both)
+    allowed = set(ids) | {by_code[c] for c in titles_in_release(g.get("title") or "", eps, sname) if c in by_code}
+    fname = lambda f: f.get("name") or Path(f.get("path") or "").name  # noqa: E731
     if len(files) == 1:
-        # a file whose name carries another episode's title isn't what was grabbed
-        named = titles_in_release(files[0].get("name") or Path(files[0].get("path") or "").name,
-                                  series.get("episodes") or [], series.get("name") or "")
-        if named and not {by_code.get(c) for c in named} <= set(ids):
+        named = [by_code.get(c) for c in titles_in_release(fname(files[0]), eps, sname)]
+        if named and not (set(named) <= allowed and set(ids) <= set(named)):
+            # a file whose name carries another episode's title isn't what was grabbed
             ai.update(note=f"not imported automatically: {Path(files[0].get('path') or '').name} "
-                           f"names {', '.join(named)}, not the episodes it was grabbed for")
+                           f"names {', '.join(c for c, i in by_code.items() if i in named)}, "
+                           "not the episodes it was grabbed for")
             return False
-        plan = [(files[0], ids)]
+        plan = [(files[0], [i for i in named if i] or ids)]
+        ids = plan[0][1]
     else:
         plan, covered = [], set()
         for f in files:
-            codes = titles_in_release(f.get("name") or Path(f.get("path") or "").name,
-                                      series.get("episodes") or [], series.get("name") or "")
+            codes = titles_in_release(fname(f), eps, sname)
             fids = [by_code[c] for c in codes if c in by_code]
-            if not fids or not set(fids) <= set(ids) or covered & set(fids):
+            if not fids or not set(fids) <= allowed or covered & set(fids):
                 ai.update(note=f"not imported automatically: can't tell which episode "
                                f"{Path(f.get('path') or '').name} is from its name")
                 return False
             covered |= set(fids)
             plan.append((f, fids))
-        if covered != set(ids):
+        if not set(ids) <= covered:
             ai.update(note="not imported automatically: the files don't cover the episodes it was grabbed for")
             return False
     body = []
@@ -674,7 +685,7 @@ def _fix_import(series: dict, sid: int | None, g: dict, item: dict, log) -> bool
         ai.update(note=f"Sonarr refused the import: {e}"[:200])
         log(f"{g.get('title')}: automatic import refused — {e}")
         return False
-    names = ", ".join(c for c, i in by_code.items() if i in ids) or "its episodes"
+    names = ", ".join(c for c, i in by_code.items() if i in {x for _f, fi in plan for x in fi}) or "its episodes"
     ai.update(note=f"import was blocked — EpisodeID imported it as {names}", sent=True)
     log(f"{g.get('title')}: Sonarr's import was blocked; imported it as {names}")
     return True
@@ -711,8 +722,9 @@ def _retry(r: dict, sid: int | None, log, rel: str) -> dict | None:
             if len(grabs) >= MAX_ATTEMPTS:
                 return None
             continue
-        g = {"title": c["title"], "guid": c["guid"], "episodes": c["covers"],
-             "episode_ids": [sonarr_eps[x] for x in c["covers"] if x in sonarr_eps],
+        meant = c["covers"] + (c.get("extra") or []) + (c.get("fills") or [])  # as _grab_one tells Sonarr
+        g = {"title": c["title"], "guid": c["guid"], "episodes": meant,
+             "episode_ids": [sonarr_eps[x] for x in meant if x in sonarr_eps],
              "at": db.now(), "status": "waiting", "retry": True}
         grabs.append(g)
         log(f"{rel}: download failed — trying the next release with the title: {c['title']}")
