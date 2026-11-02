@@ -568,6 +568,7 @@ def follow_up(series: dict, log=None) -> int:
                 ok, why = _put_back(series, rel, r, st.get("sonarr_series_id"))
                 r["restored"] = ok
                 r["restore_note"] = why
+                r["superseded"] = why.startswith("not put back: Sonarr has a file")
                 log(f"{rel}: {why}")
     _save_state(series["id"], st)
     return changed
@@ -811,13 +812,25 @@ def put_back(series: dict, rel: str) -> dict:
     return {"ok": ok, "note": why}
 
 
+def _superseded(r: dict) -> bool:
+    """The damaged file wasn't put back because Sonarr already has another file for the
+    episode — nothing is left to do (the damaged copy stays in the backup folder)."""
+    return bool(r.get("superseded")) or (r.get("restore_note") or "").startswith("not put back: Sonarr has a file")
+
+
+def finished(r: dict) -> bool:
+    """Over, with nothing left to deal with: done, put back, or failed with no damaged
+    file waiting (none moved, put back, or Sonarr has a new file for the episode anyway)."""
+    return r.get("status") in ("imported", "cancelled") or (
+        r.get("status") == "failed" and (not r.get("moved") or r.get("restored") or _superseded(r)))
+
+
 def clear_finished(series: dict) -> int:
     """Forget re-downloads that are over: done, put back, or failed with nothing left in
     the backup folder to deal with. Returns how many were cleared."""
     st = load_state(series["id"])
     req = st.get("requested") or {}
-    gone = [rel for rel, r in req.items() if r.get("status") in ("imported", "cancelled")
-            or (r.get("status") == "failed" and (not r.get("moved") or r.get("restored")))]
+    gone = [rel for rel, r in req.items() if finished(r)]
     for rel in gone:
         req.pop(rel)
     _save_state(series["id"], st)

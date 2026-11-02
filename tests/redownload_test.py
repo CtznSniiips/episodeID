@@ -606,3 +606,15 @@ assert {x["guid"] for x in seen_before} >= {"g-pair", "g-pair-other-indexer"}, s
 assert f["preselect"] and "g-pair" not in f["preselect"] and "g-pair-other-indexer" not in f["preselect"], f["preselect"]
 assert f["candidates"][-1].get("imported_before"), "ranked last"
 print("PASS (releases imported before: flagged, ranked last, not ticked — kept after Clear finished)")
+
+# --- failed, damaged file not put back because Sonarr has a new file anyway: finished, clearable
+st = redownload.load_state(sid)
+st["requested"] = {"y.mkv": {"status": "failed", "moved": True, "restored": False,
+                             "restore_note": "not put back: Sonarr has a file for that episode again (left in the backup folder)",
+                             "grabs": [{"title": "t", "status": "failed"}]},
+                   "z.mkv": {"status": "failed", "moved": True, "restored": False, "restore_note": "couldn't put it back: disk",
+                             "grabs": [{"title": "t2", "status": "failed"}]}}
+redownload._save_state(sid, st)
+assert c.post(f"/api/series/{sid}/redownload/clear").json()["cleared"] == 1
+assert list(redownload.load_state(sid)["requested"]) == ["z.mkv"], "a damaged file still to deal with stays"
+print("PASS (superseded failures are finished)")

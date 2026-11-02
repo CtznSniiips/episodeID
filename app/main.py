@@ -571,12 +571,14 @@ def _series_out(s: dict, full: bool = False) -> dict:
         out["backup"] = None
     if full:
         out["integrity_files"] = integrity.current(s)
+        from .redownload import finished as _rd_finished
         from .redownload import load_state as _rd_state
         from .redownload import missing_episodes
         out["missing_count"] = len(missing_episodes(s))
         out["redownloads"] = sum(1 for r in (_rd_state(s["id"]).get("requested") or {}).values()
                                  if isinstance(r, dict)
-                                 and r.get("status") in ("waiting", "stuck", "failed", "partly imported"))
+                                 and r.get("status") in ("waiting", "stuck", "failed", "partly imported")
+                                 and not _rd_finished(r))
         from .pipeline import reference_swaps
         last = db.latest_scan(s["id"]) if scan else None
         from .references import load_swapped

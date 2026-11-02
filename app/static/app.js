@@ -773,7 +773,9 @@ async function redownloadDialog(tab, cached, refresh = false) {
   rows.forEach((g) => counts[g.r.status] = (counts[g.r.status] || 0) + g.rels.length);
   const filt = state.rdFilter && counts[state.rdFilter] ? state.rdFilter : "all";
   const shown = rows.filter((g) => filt === "all" || g.r.status === filt);
-  const finished = Object.values(req).filter((r) => ["imported", "cancelled"].includes(r.status) || (r.status === "failed" && (!r.moved || r.restored))).length;
+  // Sonarr has a new file for the episode anyway: the damaged copy isn't needed back
+  const superseded = (r) => !!r.superseded || /^not put back: Sonarr has a file/.test(r.restore_note || "");
+  const finished = Object.values(req).filter((r) => ["imported", "cancelled"].includes(r.status) || (r.status === "failed" && (!r.moved || r.restored || superseded(r)))).length;
   const downloadsHtml = rows.length ? `
     <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
       <button class="btn small rd-f ${filt === "all" ? "active" : ""}" data-f="all">All (${Object.keys(req).length})</button>
@@ -795,7 +797,7 @@ async function redownloadDialog(tab, cached, refresh = false) {
           ${r.restore_note ? `<div class="muted">${esc(r.restore_note)}</div>` : ""}
           ${tries > 1 ? `<details data-k="att|${esc(rels[0])}"><summary class="muted" style="cursor:pointer">${tries} attempts</summary>${(r.grabs || []).map((g) => `<div class="muted mono" style="word-break:break-all;margin-left:12px">• ${esc(g.title)}${g.reason ? ` — <span style="color:var(--bad);font-family:inherit">${esc(shortReason(g.reason))}</span>` : g.status === "imported" ? " — ✓" : ""}</div>`).join("")}</details>` : ""}
         </div>
-        ${r.moved && !r.restored && ["waiting", "stuck", "failed"].includes(r.status) ? rels.map((p) => `<button class="btn small rd-back" data-rel="${esc(p)}" title="Move the damaged file back from the backup folder">Put back</button>`).join("") : ""}
+        ${r.moved && !r.restored && !superseded(r) && ["waiting", "stuck", "failed"].includes(r.status) ? rels.map((p) => `<button class="btn small rd-back" data-rel="${esc(p)}" title="Move the damaged file back from the backup folder">Put back</button>`).join("") : ""}
       </div>`; }).join("") || `<div class="small muted">Nothing here.</div>`}</div>
     <div class="small muted" style="margin-top:8px">Checked in Sonarr's history every few minutes. When Sonarr blocks an import because the name's numbers aren't the episodes it was grabbed for, EpisodeID imports it as the right ones. If a download fails and no other release
       with the title is left, a damaged file is put back so the episode isn't left without one.</div>` :
