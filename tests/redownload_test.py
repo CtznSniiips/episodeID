@@ -442,3 +442,49 @@ assert pa["pct"] == 75 and pa["timeleft"] == "00:12:30" and pa["state"] == "down
 assert pb["pct"] == 100 and pb["state"] == "import blocked" and "not found" in pb["message"], pb
 assert "not in Sonarr's queue" in pc["state"] and "progress" not in req["d"]["grabs"][0]
 print("PASS (progress from Sonarr's queue)")
+
+# --- reconciling with Sonarr's queue: grabbed, then gone from the queue with no history event
+from datetime import datetime, timedelta, timezone  # noqa: E402,F811
+
+ago = lambda m: (datetime.now(timezone.utc) - timedelta(minutes=m)).isoformat(timespec="seconds")  # noqa: E731
+QUEUE, HEALTH = [], []
+sonarr.queue = lambda sid=None: list(QUEUE)
+sonarr._get = lambda path, timeout=60, **p: list(HEALTH) if path == "health" else {}
+HAS.clear()
+sent.clear()
+
+
+def one(code, epid, dl, at_min=30, **extra):
+    return {"status": "waiting", "auto_retry": False, "moved": False, "want": [code], "candidates": [],
+            "grabs": [{"title": f"Show.{code}.x", "guid": dl, "episodes": [code], "episode_ids": [epid],
+                       "at": ago(at_min), "status": "waiting", "download_id": dl, **extra}]}
+
+
+def run(req):
+    st = redownload.load_state(sid)
+    st["requested"] = req
+    redownload._save_state(sid, st)
+    redownload.follow_up(db.get_series(sid))
+    return redownload.load_state(sid)["requested"]
+
+
+HIST[:] = []
+QUEUE[:] = [{"downloadId": "IN_Q", "title": "whatever"}]
+HAS.add(1208)
+r = run({"inq": one("S02E07", 1207, "IN_Q"),               # still downloading: left alone
+         "imp": one("S02E08", 1208, "GONE_HAS"),           # gone, Sonarr has the episode: imported
+         "new": one("S02E09", 1209, "GONE_NEW"),           # gone, just now: noted, not failed yet
+         "old": one("S02E10", 1210, "GONE_OLD", gone_since=ago(20)),  # gone 20 min: failed
+         "fresh": one("S02E06", 1206, "FRESH", at_min=1)})  # grabbed a minute ago: not judged
+assert r["inq"]["status"] == "waiting" and "gone_since" not in r["inq"]["grabs"][0], r["inq"]
+assert r["imp"]["status"] == "imported" and r["imp"]["grabs"][0]["status"] == "imported", r["imp"]
+assert r["new"]["status"] == "waiting" and r["new"]["grabs"][0].get("gone_since"), r["new"]
+assert r["old"]["status"] == "failed" and "removed from Sonarr's queue" in r["old"]["grabs"][0]["reason"], r["old"]
+assert r["fresh"]["status"] == "waiting" and "gone_since" not in r["fresh"]["grabs"][0], r["fresh"]
+print("PASS (gone from Sonarr's queue: imported if Sonarr has it, failed after a while)")
+
+HEALTH[:] = [{"source": "DownloadClientCheck", "type": "error", "message": "Unable to communicate with SABnzbd"}]
+r = run({"old": one("S02E10", 1210, "GONE_OLD", gone_since=ago(60))})
+assert r["old"]["status"] == "waiting", "download client down: an empty queue proves nothing"
+HEALTH[:] = []
+print("PASS (download client unreachable: nothing failed)")

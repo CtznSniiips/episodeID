@@ -394,6 +394,7 @@ def grab(series: dict, picks: list[dict], ctx_log=None, auto_retry: bool = True)
 HISTORY_SLACK = 10 * 60        # read Sonarr's history from this long before a grab was noted
 GRAB_SEEN_WITHIN = 30 * 60      # no "grabbed" in Sonarr's history after this long: it never happened
 STUCK_AFTER = 48 * 3600         # downloading/importing for longer than this: needs a look
+GONE_AFTER = 15 * 60            # grabbed, then out of Sonarr's queue this long with no import: over
 _IMPORTED = ("downloadFolderImported", "seriesFolderImported")
 _FAILED = ("downloadFailed", "downloadIgnored")
 
@@ -488,6 +489,7 @@ def follow_up(series: dict, log=None) -> int:
         if _age(g["at"]) > STUCK_AFTER and g.get("status") == "waiting":
             g.update(status="stuck", reason="not imported after 2 days — check Sonarr's Activity queue")
             changed += 1
+    changed += _reconcile_with_queue(st, [g for _rel, g in waiting if g.get("status") == "waiting"], log)
     for rel, r in req.items():
         if r.get("status") != "waiting":
             continue
@@ -520,6 +522,50 @@ def follow_up(series: dict, log=None) -> int:
                 r["restore_note"] = why
                 log(f"{rel}: {why}")
     _save_state(series["id"], st)
+    return changed
+
+
+def _reconcile_with_queue(st: dict, waiting: list[dict], log) -> int:
+    """Sonarr's history doesn't always say how a download ended: one removed from the queue
+    (or from the download client) without blocklisting leaves no event, and a manual import
+    may not carry the download id. So a grab Sonarr took that has left its queue is over:
+    imported if Sonarr now has its episodes, otherwise failed once it has stayed gone for
+    GONE_AFTER. Returns how many grabs changed state."""
+    # not a just-made grab: Sonarr's queue and its rescan of the moved file need a moment
+    seen = [g for g in waiting if g.get("download_id") and _age(g["at"]) >= 5 * 60]
+    if not seen:
+        return 0
+    sid = st.get("sonarr_series_id")
+    try:
+        q = sonarr.queue(sid)
+        have = {e["id"] for e in sonarr.episodes(sid) if e.get("hasFile")}
+    except sonarr.SonarrError:
+        return 0
+    in_q_ids = {x.get("downloadId") for x in q}
+    in_q_titles = {_norm(x.get("title")) for x in q}
+    trouble = None  # asked only when needed
+    changed = 0
+    for g in seen:
+        if g["download_id"] in in_q_ids or _norm(g.get("title")) in in_q_titles:
+            g.pop("gone_since", None)
+            continue
+        ids = set(g.get("episode_ids") or [])
+        if ids and ids <= have:
+            g.update(status="imported", done_at=db.now(), note="left Sonarr's queue and Sonarr has the episode "
+                     "(no import record for this download — imported by hand, or by another grab)")
+            g.pop("gone_since", None)
+            changed += 1
+            continue
+        if trouble is None:
+            trouble = sonarr.download_client_trouble()
+        if trouble:
+            continue  # the queue may just be missing what an unreachable client holds
+        g.setdefault("gone_since", db.now())
+        if _age(g["gone_since"]) >= GONE_AFTER:
+            g.update(status="failed", reason="removed from Sonarr's queue without being imported")
+            g.pop("gone_since", None)
+            log(f"{g.get('title')}: no longer in Sonarr's queue and never imported")
+            changed += 1
     return changed
 
 

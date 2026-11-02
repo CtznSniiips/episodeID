@@ -202,6 +202,17 @@ def history_since(date_iso: str) -> list[dict]:
     return _get("history/since", date=date_iso) or []
 
 
+def download_client_trouble() -> bool:
+    """Does Sonarr's health check say a download client can't be reached? (Then its
+    queue is missing whatever that client holds, so an empty queue proves nothing.)"""
+    try:
+        checks = _get("health") or []
+    except SonarrError:
+        return True
+    return any("downloadclient" in (c.get("source") or "").lower() and c.get("type") in ("error", "warning")
+               for c in checks)
+
+
 def queue(sonarr_series_id: int | None = None) -> list[dict]:
     """Sonarr's download queue (what the download client is working on), for one series."""
     params = {"page": 1, "pageSize": 1000, "includeEpisode": "false"}
