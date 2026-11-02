@@ -486,10 +486,12 @@ def follow_up(series: dict, log=None) -> int:
                 g.update(status="failed", reason=f"{'download failed' if bad['eventType'] == 'downloadFailed' else 'ignored in Sonarr'}: {msg}"[:300])
                 changed += 1
                 continue
+    # what has left Sonarr's queue is settled first, so "stuck" only means still sitting there
+    changed += _reconcile_with_queue(st, [g for _rel, g in waiting if g.get("status") == "waiting"], log)
+    for _rel, g in waiting:
         if _age(g["at"]) > STUCK_AFTER and g.get("status") == "waiting":
             g.update(status="stuck", reason="not imported after 2 days — check Sonarr's Activity queue")
             changed += 1
-    changed += _reconcile_with_queue(st, [g for _rel, g in waiting if g.get("status") == "waiting"], log)
     for rel, r in req.items():
         if r.get("status") != "waiting":
             continue

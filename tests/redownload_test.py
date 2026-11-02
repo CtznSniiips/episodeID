@@ -488,3 +488,12 @@ r = run({"old": one("S02E10", 1210, "GONE_OLD", gone_since=ago(60))})
 assert r["old"]["status"] == "waiting", "download client down: an empty queue proves nothing"
 HEALTH[:] = []
 print("PASS (download client unreachable: nothing failed)")
+
+# Over 2 days old: gone from the queue and Sonarr has it → imported, not "stuck"; still queued → stuck
+QUEUE[:] = [{"downloadId": "SLOW", "title": "x"}]
+HAS.clear(); HAS.add(1208)
+r = run({"imp": one("S02E08", 1208, "OLD_GONE", at_min=3 * 24 * 60),
+         "slow": one("S02E07", 1207, "SLOW", at_min=3 * 24 * 60)})
+assert r["imp"]["status"] == "imported", r["imp"]
+assert r["slow"]["status"] == "stuck" and "2 days" in r["slow"]["grabs"][0]["reason"], r["slow"]
+print("PASS (stuck only when still in Sonarr's queue after 2 days)")
