@@ -567,3 +567,24 @@ r = run({"missing:S02E09": a, "missing:S02E10": b})
 assert len(GOT) == 1 and sorted(GOT[0][0]["episodeIds"]) == [1209, 1210], GOT
 assert r["missing:S02E10"]["grabs"][0]["auto_import"]["sent"], r
 print("PASS (two-episode release: imported as both, once)")
+
+# An old grab whose download is gone, while the same release (same name) is in the queue under
+# another download: not "in the queue"; and once that other download imports these episodes, done.
+GOT.clear()
+HIST[:] = []
+HAS.clear(); HAS.update({1209, 1210})  # the damaged file, put back
+QUEUE[:] = [blocked("NEW")]
+QUEUE[0]["outputPath"] = "/dl/new"
+MI["NEW"] = [{"path": "/dl/new/Show.S02E09-S02E10.Halloween.The.Treasure.1080p.mkv", "name": "Show.S02E09-S02E10.Halloween.The.Treasure.1080p"}]
+old_ = one("S02E09", 1209, "OLD_DL", at_min=3 * 24 * 60)
+old_.update(status="stuck", moved=True, restored=True, want=["S02E09", "S02E10"])
+old_["grabs"][0].update(status="stuck", title="Show.S02E09-S02E10.Halloween.The.Treasure.1080p", episode_ids=[1209, 1210],
+                        episodes=["S02E09", "S02E10"])
+r = run({"damaged.mkv": old_})
+g = r["damaged.mkv"]["grabs"][0]
+assert not GOT and g.get("gone_since") and r["damaged.mkv"]["status"] == "stuck", r  # gone; the put-back file isn't an import
+HIST[:] = [{"eventType": "downloadFolderImported", "episodeId": e, "sourceTitle": g["title"], "downloadId": "NEW",
+            "date": datetime.now(timezone.utc).isoformat()} for e in (1209, 1210)]
+r = run(redownload.load_state(sid)["requested"])
+assert r["damaged.mkv"]["status"] == "imported", r
+print("PASS (same release imported under another download: done; name alone isn't 'in the queue')")

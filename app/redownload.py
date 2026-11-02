@@ -485,7 +485,11 @@ def follow_up(series: dict, log=None) -> int:
         did = g.get("download_id")
         if did:
             evs = [h for h in hist if h.get("downloadId") == did and h.get("eventType") in _IMPORTED + _FAILED]
-            if any(h["eventType"] in _IMPORTED for h in evs):
+            # or the same release, grabbed again (for another file) and imported as these episodes
+            again = ids and ids <= {h.get("episodeId") for h in hist if h.get("eventType") in _IMPORTED
+                                    and _norm(h.get("sourceTitle")) == _norm(g.get("title"))
+                                    and _ts(h.get("date")) >= _ts(g["at"])}
+            if again or any(h["eventType"] in _IMPORTED for h in evs):
                 g.update(status="imported", done_at=db.now())
                 changed += 1
                 continue
@@ -496,7 +500,9 @@ def follow_up(series: dict, log=None) -> int:
                 changed += 1
                 continue
     # what has left Sonarr's queue is settled first, so "stuck" only means still sitting there
-    changed += _reconcile_with_queue(series, st, [g for _rel, g in waiting if g.get("status") == "waiting"], log)
+    restored = {id(g) for rel, g in waiting if (req.get(rel) or {}).get("restored")}
+    changed += _reconcile_with_queue(series, st, [g for _rel, g in waiting if g.get("status") == "waiting"], log,
+                                     restored)
     for _rel, g in waiting:
         if _age(g["at"]) > STUCK_AFTER and g.get("status") == "waiting":
             g.update(status="stuck", reason="not imported after 2 days — check Sonarr's Activity queue")
@@ -528,7 +534,7 @@ def follow_up(series: dict, log=None) -> int:
             r["status"] = "failed"
             reasons = "; ".join(g.get("reason") or "failed" for g in r.get("grabs") or [])
             log(f"{rel}: re-download failed ({reasons})")
-            if r.get("moved"):
+            if r.get("moved") and not r.get("restored"):
                 ok, why = _put_back(series, rel, r, st.get("sonarr_series_id"))
                 r["restored"] = ok
                 r["restore_note"] = why
@@ -537,7 +543,7 @@ def follow_up(series: dict, log=None) -> int:
     return changed
 
 
-def _reconcile_with_queue(series: dict, st: dict, waiting: list[dict], log) -> int:
+def _reconcile_with_queue(series: dict, st: dict, waiting: list[dict], log, restored: set | None = None) -> int:
     """Sonarr's history doesn't always say how a download ended: one removed from the queue
     (or from the download client) without blocklisting leaves no event, and a manual import
     may not carry the download id. So a grab Sonarr took that has left its queue is over:
@@ -554,14 +560,12 @@ def _reconcile_with_queue(series: dict, st: dict, waiting: list[dict], log) -> i
     except sonarr.SonarrError:
         return 0
     in_q_ids = {x.get("downloadId") for x in q}
-    in_q_titles = {_norm(x.get("title")) for x in q}
     trouble = None  # asked only when needed
     changed = 0
     for g in seen:
-        if g["download_id"] in in_q_ids or _norm(g.get("title")) in in_q_titles:
+        if g["download_id"] in in_q_ids:
             g.pop("gone_since", None)
-            item = next((x for x in q if x.get("downloadId") == g["download_id"]), None) or \
-                next((x for x in q if _norm(x.get("title")) == _norm(g.get("title"))), None)
+            item = next((x for x in q if x.get("downloadId") == g["download_id"]), None)
             if item and _import_blocked(item):
                 twin = next((x for x in seen if x is not g and x.get("download_id") == g["download_id"]
                              and (x.get("auto_import") or {}).get("sent")
@@ -572,7 +576,7 @@ def _reconcile_with_queue(series: dict, st: dict, waiting: list[dict], log) -> i
                     _fix_import(series, sid, g, item, log)
             continue
         ids = set(g.get("episode_ids") or [])
-        if ids and ids <= have:
+        if ids and ids <= have and id(g) not in (restored or set()):
             g.update(status="imported", done_at=db.now(), note="left Sonarr's queue and Sonarr has the episode "
                      "(no import record for this download — imported by hand, or by another grab)")
             g.pop("gone_since", None)
