@@ -1,11 +1,13 @@
 """Getting timed dialogue out of a video file.
 
-Order of preference:
+Order of preference when external sidecars are enabled:
   1. sidecar subtitle file next to the video (.srt/.ass/.ssa/.vtt)
   2. embedded text subtitle stream (subrip, ass, mov_text, webvtt)
   3. Whisper transcription of the audio (also used for image-based subs)
 
-Results are cached under /cache/text keyed by path+size+mtime.
+When sidecar subtitles are disabled, embedded text tracks are preferred and
+Whisper remains the fallback. Results are cached under /cache/text keyed by
+path+size+mtime; cached sidecar results are ignored when sidecars are disabled.
 """
 from __future__ import annotations
 
@@ -202,12 +204,21 @@ def extract_embedded(video: Path, info: dict, lang: str) -> tuple[list[Cue], str
     return (cues, f"embedded #{best['index']}") if cues else None
 
 
-def cached_dialogue(video: Path) -> dict | None:
-    """The dialogue already read from this file, or None — never reads the file."""
+def _read_cached(path: Path, allow_sidecars: bool) -> dict | None:
     try:
-        return json.loads(_cache_file(video).read_text())
+        data = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict) or not isinstance(data.get("source"), str):
+        return None
+    if not allow_sidecars and data["source"].startswith("sidecar "):
+        return None
+    return data
+
+
+def cached_dialogue(video: Path) -> dict | None:
+    """The dialogue already read from this file, or None — never reads the file."""
+    return _read_cached(_cache_file(video), get_settings()["sidecar_subtitles"])
 
 
 def get_dialogue(video: Path, ctx=None, allow_whisper: bool = True) -> dict:
@@ -216,20 +227,20 @@ def get_dialogue(video: Path, ctx=None, allow_whisper: bool = True) -> dict:
     s = get_settings()
     lang = s["subtitle_language"]
     cache = _cache_file(video)
-    if cache.exists():
-        data = json.loads(cache.read_text())
-        if data["source"] != "none" or not allow_whisper or not s["whisper_enabled"]:
-            return data
+    data = _read_cached(cache, s["sidecar_subtitles"])
+    if data is not None and (data["source"] != "none" or not allow_whisper or not s["whisper_enabled"]):
+        return data
 
     info = probe(video)
     dur = duration(info)
     result = None
 
-    sc = sidecar_subtitle(video, lang)
-    if sc:
-        cues = parse_subtitle_text(read_text_file(sc), sc.suffix.lower())
-        if cues:
-            result = (cues, f"sidecar {sc.name}")
+    if s["sidecar_subtitles"]:
+        sc = sidecar_subtitle(video, lang)
+        if sc:
+            cues = parse_subtitle_text(read_text_file(sc), sc.suffix.lower())
+            if cues:
+                result = (cues, f"sidecar {sc.name}")
     if result is None:
         result = extract_embedded(video, info, lang)
     if result is None and allow_whisper and s["whisper_enabled"]:
