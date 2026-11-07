@@ -121,6 +121,7 @@ Everything is editable in the web UI; any environment variable overrides the UI 
 | `TVDB_API_KEY`, `TVDB_PIN` | | Required. PIN only for user-supported keys. |
 | `OPENSUBTITLES_API_KEY`, `_USERNAME`, `_PASSWORD` | | Downloads need an account. Free accounts have a small daily cap — fetches resume where they stopped. |
 | `SUBTITLE_LANGUAGE` | `en` | Reference language and embedded-track preference |
+| `SIDECAR_SUBTITLES` | `true` | Use `.srt`, `.ass`, `.ssa` and `.vtt` files beside videos as dialogue evidence. Set `false` when Bazarr or another tool manages sidecars separately; EpisodeID then uses embedded tracks or Whisper. |
 | `WHISPER_ENABLED` / `WHISPER_MODEL` / `WHISPER_DEVICE` | `true` / `small` / `auto` | |
 | `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | off | e.g. `http://ollama:11434/v1`, `qwen3:8b` |
 | `SONARR_URL`, `SONARR_API_KEY` | | Triggers a series rescan after apply/undo; *Copy from Sonarr* (Settings → Naming) copies its naming settings; *Compare with Sonarr*; the import webhook |

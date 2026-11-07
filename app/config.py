@@ -28,6 +28,7 @@ SCHEMA: dict[str, tuple[object, str, bool]] = {
     "opensubtitles_username": ("", "OPENSUBTITLES_USERNAME", False),
     "opensubtitles_password": ("", "OPENSUBTITLES_PASSWORD", True),
     "subtitle_language": ("en", "SUBTITLE_LANGUAGE", False),
+    "sidecar_subtitles": (True, "SIDECAR_SUBTITLES", False),
     # Whisper
     "whisper_enabled": (True, "WHISPER_ENABLED", False),
     "whisper_model": ("small", "WHISPER_MODEL", False),

@@ -1701,6 +1701,7 @@ async function renderSettings() {
     ${f("opensubtitles_username", "Username", "An account is needed to download. Free accounts have a small daily download limit — downloads are cached, so large series fill in over a few days.")}
     ${f("opensubtitles_password", "Password", "", "password")}
     ${f("subtitle_language", "Subtitle language", "Two-letter code, e.g. en. Also used to pick embedded subtitle tracks.")}
+    ${cb("sidecar_subtitles", "Use external subtitle sidecars", "Reads .srt, .ass, .ssa and .vtt files beside videos as dialogue evidence. Turn this off when Bazarr or another tool manages those files separately; EpisodeID will use embedded tracks or Whisper instead.")}
     ${test("opensubtitles")}</fieldset>
   <fieldset><legend>Whisper (files without subtitles)</legend>
     ${cb("whisper_enabled", "Enabled")}
