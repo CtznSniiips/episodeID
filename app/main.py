@@ -33,6 +33,8 @@ def _startup():
     db.init()
     jobs.start()
     redownload.start_follower()
+    from . import autocheck
+    autocheck.start()  # the daily (AUTO_CHECK_HOURS) look for added, replaced or removed files
     import threading
     from .references import warm_reference_cache
     threading.Thread(target=warm_reference_cache, name="warm-refs", daemon=True).start()
